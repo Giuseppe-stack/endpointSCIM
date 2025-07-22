@@ -1,38 +1,31 @@
 from flask import Flask, request, jsonify, abort
-import base64
 import os
 import re
 
 app = Flask(__name__)
 
-# Credenziali accettate dal tuo SCIM server
-VALID_USERNAME = "entra"
-VALID_PASSWORD = "supersegreto"
+# Token Bearer che Microsoft Entra ID invierà nelle richieste
+EXPECTED_BEARER_TOKEN = "supersegreto"  # <-- cambia questo e inseriscilo anche su Entra ID
 
-# Middleware Basic Auth
+# Middleware di autenticazione Bearer
 @app.before_request
-def check_auth():
+def check_bearer_token():
     auth_header = request.headers.get('Authorization')
-    if not auth_header or not auth_header.startswith('Basic '):
-        abort(401, description="Unauthorized: Missing Basic auth")
+    if not auth_header or not auth_header.startswith('Bearer '):
+        abort(401, description="Unauthorized: Missing Bearer token")
+    
+    token = auth_header.split(' ')[1]
+    if token != EXPECTED_BEARER_TOKEN:
+        abort(401, description="Unauthorized: Invalid Bearer token")
 
-    try:
-        base64_credentials = auth_header.split(' ')[1]
-        decoded_credentials = base64.b64decode(base64_credentials).decode('utf-8')
-        username, password = decoded_credentials.split(':', 1)
-    except Exception:
-        abort(401, description="Unauthorized: Malformed credentials")
-
-    if username != VALID_USERNAME or password != VALID_PASSWORD:
-        abort(401, description="Unauthorized: Invalid credentials")
-
-# Dati statici di esempio
+# Dati statici in memoria (esempio)
 users = {
     "user-1": {"id": "user-1", "userName": "alice@example.com", "groups": []},
     "user-2": {"id": "user-2", "userName": "bob@example.com", "groups": []}
 }
 groups = {}
 
+# Configurazione SCIM
 @app.route('/scim/v2/ServiceProviderConfig', methods=['GET'])
 def service_provider_config():
     return jsonify({
@@ -44,13 +37,14 @@ def service_provider_config():
         "sort": {"supported": True},
         "etag": {"supported": False},
         "authenticationSchemes": [{
-            "type": "httpbasic",
-            "name": "HTTP Basic",
-            "description": "Basic authentication",
-            "specUri": "http://www.rfc-editor.org/info/rfc7617"
+            "type": "oauthbearertoken",
+            "name": "OAuth Bearer Token",
+            "description": "SCIM Bearer Token Authentication",
+            "specUri": "http://www.rfc-editor.org/info/rfc6750"
         }]
     })
 
+# Lista utenti con filtro (supporta userName eq "...")
 @app.route('/scim/v2/Users', methods=['GET'])
 def list_users():
     filter_query = request.args.get('filter')
@@ -69,6 +63,7 @@ def list_users():
         "startIndex": 1
     })
 
+# Lista gruppi
 @app.route('/scim/v2/Groups', methods=['GET'])
 def list_groups():
     return jsonify({
@@ -78,6 +73,7 @@ def list_groups():
         "startIndex": 1
     })
 
+# Crea un gruppo
 @app.route('/scim/v2/Groups', methods=['POST'])
 def create_group():
     data = request.get_json()
@@ -92,6 +88,7 @@ def create_group():
 
     return jsonify(data), 201
 
+# Modifica membri di un gruppo
 @app.route('/scim/v2/Groups/<group_id>', methods=['PATCH'])
 def update_group(group_id):
     if group_id not in groups:
@@ -111,6 +108,7 @@ def update_group(group_id):
 
     return jsonify(groups[group_id])
 
+# Cancella un gruppo
 @app.route('/scim/v2/Groups/<group_id>', methods=['DELETE'])
 def delete_group(group_id):
     if group_id in groups:
@@ -119,6 +117,11 @@ def delete_group(group_id):
                 user['groups'].remove(group_id)
         del groups[group_id]
     return '', 204
+
+# (Facoltativo) Root - utile per Render
+@app.route('/')
+def home():
+    return "SCIM Flask server is running."
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
