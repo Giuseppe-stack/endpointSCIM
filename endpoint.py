@@ -4,7 +4,7 @@ import os
 app = Flask(__name__)
 
 # Token segreto condiviso con Entra ID
-VALID_BEARER_TOKEN = "Bearer supersegreto"
+VALID_BEARER_TOKEN = "supersegreto"
 
 # Utenti e gruppi in memoria (demo)
 users = {}
