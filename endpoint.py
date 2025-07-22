@@ -1,27 +1,37 @@
 from flask import Flask, request, jsonify, abort
-
+import base64
 import os
+import re
 
 app = Flask(__name__)
 
-# Token segreto condiviso con Entra ID
-VALID_BEARER_TOKEN = "Bearer inserisci-qui-il-tuo-token"
+# Credenziali accettate dal tuo SCIM server
+VALID_USERNAME = "entra"
+VALID_PASSWORD = "supersegreto"
 
-# Utenti statici predefiniti
+# Middleware Basic Auth
+@app.before_request
+def check_auth():
+    auth_header = request.headers.get('Authorization')
+    if not auth_header or not auth_header.startswith('Basic '):
+        abort(401, description="Unauthorized: Missing Basic auth")
+
+    try:
+        base64_credentials = auth_header.split(' ')[1]
+        decoded_credentials = base64.b64decode(base64_credentials).decode('utf-8')
+        username, password = decoded_credentials.split(':', 1)
+    except Exception:
+        abort(401, description="Unauthorized: Malformed credentials")
+
+    if username != VALID_USERNAME or password != VALID_PASSWORD:
+        abort(401, description="Unauthorized: Invalid credentials")
+
+# Dati statici di esempio
 users = {
     "user-1": {"id": "user-1", "userName": "alice@example.com", "groups": []},
     "user-2": {"id": "user-2", "userName": "bob@example.com", "groups": []}
 }
-
-# Gruppi ricevuti da Entra ID
 groups = {}
-
-# Middleware per autenticazione Bearer
-@app.before_request
-def check_auth():
-    auth_header = request.headers.get('Authorization')
-    if not auth_header or auth_header != VALID_BEARER_TOKEN:
-        abort(401, description="Unauthorized: Invalid or missing Bearer token")
 
 @app.route('/scim/v2/ServiceProviderConfig', methods=['GET'])
 def service_provider_config():
@@ -34,11 +44,38 @@ def service_provider_config():
         "sort": {"supported": True},
         "etag": {"supported": False},
         "authenticationSchemes": [{
-            "type": "oauthbearertoken",
-            "name": "OAuth Bearer Token",
-            "description": "SCIM Bearer Token",
-            "specUri": "http://www.rfc-editor.org/info/rfc6750"
+            "type": "httpbasic",
+            "name": "HTTP Basic",
+            "description": "Basic authentication",
+            "specUri": "http://www.rfc-editor.org/info/rfc7617"
         }]
+    })
+
+@app.route('/scim/v2/Users', methods=['GET'])
+def list_users():
+    filter_query = request.args.get('filter')
+    filtered_users = list(users.values())
+
+    if filter_query:
+        match = re.match(r'userName eq "(.+)"', filter_query)
+        if match:
+            username = match.group(1)
+            filtered_users = [u for u in users.values() if u["userName"] == username]
+
+    return jsonify({
+        "Resources": filtered_users,
+        "totalResults": len(filtered_users),
+        "itemsPerPage": 100,
+        "startIndex": 1
+    })
+
+@app.route('/scim/v2/Groups', methods=['GET'])
+def list_groups():
+    return jsonify({
+        "Resources": list(groups.values()),
+        "totalResults": len(groups),
+        "itemsPerPage": 100,
+        "startIndex": 1
     })
 
 @app.route('/scim/v2/Groups', methods=['POST'])
@@ -47,7 +84,6 @@ def create_group():
     group_id = data.get('id', f"group-{len(groups)+1}")
     groups[group_id] = data
 
-    # Assegna il gruppo agli utenti esistenti indicati nel payload
     for member in data.get('members', []):
         user_id = member.get('value')
         if user_id in users:
@@ -64,11 +100,9 @@ def update_group(group_id):
     patch_data = request.get_json()
     for op in patch_data.get('Operations', []):
         if op['op'].lower() == 'replace' and 'members' in op['value']:
-            # Rimuove il gruppo da tutti gli utenti
             for user in users.values():
                 if group_id in user['groups']:
                     user['groups'].remove(group_id)
-            # Aggiunge il gruppo agli utenti indicati
             for member in op['value']['members']:
                 user_id = member.get('value')
                 if user_id in users:
@@ -86,26 +120,6 @@ def delete_group(group_id):
         del groups[group_id]
     return '', 204
 
-@app.route('/scim/v2/Groups', methods=['GET'])
-def list_groups():
-    return jsonify({
-        "Resources": list(groups.values()),
-        "totalResults": len(groups),
-        "itemsPerPage": 100,
-        "startIndex": 1
-    })
-
-@app.route('/scim/v2/Users', methods=['GET'])
-def list_users():
-    return jsonify({
-        "Resources": list(users.values()),
-        "totalResults": len(users),
-        "itemsPerPage": 100,
-        "startIndex": 1
-    })
-
-
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
-
