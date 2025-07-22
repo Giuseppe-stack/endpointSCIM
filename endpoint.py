@@ -2,10 +2,16 @@ from flask import Flask, request, jsonify, abort
 
 app = Flask(__name__)
 
-# Token di esempio (da sostituire con uno reale)
-VALID_BEARER_TOKEN = "Bearer eyJhbGciOi..."
+# Token segreto condiviso con Entra ID
+VALID_BEARER_TOKEN = "Bearer inserisci-qui-il-tuo-token"
 
-# In-memory storage per i gruppi
+# Utenti statici predefiniti
+users = {
+    "user-1": {"id": "user-1", "userName": "alice@example.com", "groups": []},
+    "user-2": {"id": "user-2", "userName": "bob@example.com", "groups": []}
+}
+
+# Gruppi ricevuti da Entra ID
 groups = {}
 
 # Middleware per autenticazione Bearer
@@ -38,31 +44,60 @@ def create_group():
     data = request.get_json()
     group_id = data.get('id', f"group-{len(groups)+1}")
     groups[group_id] = data
+
+    # Assegna il gruppo agli utenti esistenti indicati nel payload
+    for member in data.get('members', []):
+        user_id = member.get('value')
+        if user_id in users:
+            if group_id not in users[user_id]['groups']:
+                users[user_id]['groups'].append(group_id)
+
     return jsonify(data), 201
 
-@app.route('/scim/v2/Groups/<group_id>', methods=['GET', 'PATCH', 'DELETE'])
-def manage_group(group_id):
+@app.route('/scim/v2/Groups/<group_id>', methods=['PATCH'])
+def update_group(group_id):
     if group_id not in groups:
         abort(404, description="Group not found")
 
-    if request.method == 'GET':
-        return jsonify(groups[group_id])
-    'PATCH'
-        patch_data = request.get_json()
-        for op in patch_data.get('Operations', []):
-            if op['op'] == 'replace':
-                for key, value in op['value'].items():
-                    groups[group_id][key] = value
-        return jsonify(groups[group_id])
-    elif request.method == 'DELETE':
+    patch_data = request.get_json()
+    for op in patch_data.get('Operations', []):
+        if op['op'].lower() == 'replace' and 'members' in op['value']:
+            # Rimuove il gruppo da tutti gli utenti
+            for user in users.values():
+                if group_id in user['groups']:
+                    user['groups'].remove(group_id)
+            # Aggiunge il gruppo agli utenti indicati
+            for member in op['value']['members']:
+                user_id = member.get('value')
+                if user_id in users:
+                    if group_id not in users[user_id]['groups']:
+                        users[user_id]['groups'].append(group_id)
+
+    return jsonify(groups[group_id])
+
+@app.route('/scim/v2/Groups/<group_id>', methods=['DELETE'])
+def delete_group(group_id):
+    if group_id in groups:
+        for user in users.values():
+            if group_id in user['groups']:
+                user['groups'].remove(group_id)
         del groups[group_id]
-        return '', 204
+    return '', 204
 
 @app.route('/scim/v2/Groups', methods=['GET'])
 def list_groups():
     return jsonify({
         "Resources": list(groups.values()),
         "totalResults": len(groups),
+        "itemsPerPage": 100,
+        "startIndex": 1
+    })
+
+@app.route('/scim/v2/Users', methods=['GET'])
+def list_users():
+    return jsonify({
+        "Resources": list(users.values()),
+        "totalResults": len(users),
         "itemsPerPage": 100,
         "startIndex": 1
     })
