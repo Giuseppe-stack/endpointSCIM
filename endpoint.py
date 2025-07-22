@@ -3,25 +3,23 @@ import os
 
 app = Flask(__name__)
 
-# Token usato da Entra ID
-EXPECTED_BEARER_TOKEN = "supersegreto"  # Deve corrispondere a quanto inserisci nel campo Secret Token su Entra ID
+# Token segreto condiviso con Entra ID
+VALID_BEARER_TOKEN = "Bearer supersegreto"
 
-# In-memory database simulato
+# Utenti e gruppi in memoria (demo)
 users = {}
 groups = {}
 
-# 🔐 Middleware: verifica Bearer token in ogni richiesta
+# ✅ Middleware per autenticazione, ma esclude ServiceProviderConfig
 @app.before_request
-def check_bearer_token():
+def check_auth():
+    if request.path == '/scim/v2/ServiceProviderConfig':
+        return  # Entra lo chiama senza token
     auth_header = request.headers.get('Authorization')
-    if not auth_header or not auth_header.startswith('Bearer '):
-        abort(401, description="Unauthorized: Missing Bearer token")
-    
-    token = auth_header.split(" ")[1]
-    if token != EXPECTED_BEARER_TOKEN:
-        abort(401, description="Unauthorized: Invalid Bearer token")
+    if not auth_header or auth_header != VALID_BEARER_TOKEN:
+        abort(401, description="Unauthorized: Invalid or missing Bearer token")
 
-# 🔧 Configurazione del provider SCIM
+# 🔧 SCIM Service Provider Configuration
 @app.route('/scim/v2/ServiceProviderConfig', methods=['GET'])
 def service_provider_config():
     return jsonify({
@@ -40,7 +38,23 @@ def service_provider_config():
         }]
     })
 
-# 👤 GET /Users – elenco utenti
+# 📩 Creazione utente (da Entra)
+@app.route('/scim/v2/Users', methods=['POST'])
+def create_user():
+    data = request.get_json()
+    user_id = data.get('id', data.get('externalId', f"user-{len(users)+1}"))
+    user = {
+        "id": user_id,
+        "userName": data.get("userName"),
+        "name": data.get("name", {}),
+        "emails": data.get("emails", []),
+        "externalId": data.get("externalId"),
+        "schemas": data.get("schemas", [])
+    }
+    users[user_id] = user
+    return jsonify(user), 201
+
+# 🔁 Lista utenti
 @app.route('/scim/v2/Users', methods=['GET'])
 def list_users():
     return jsonify({
@@ -50,33 +64,21 @@ def list_users():
         "startIndex": 1
     })
 
-# 👤 POST /Users – crea utente
-@app.route('/scim/v2/Users', methods=['POST'])
-def create_user():
+# 📩 Creazione gruppo
+@app.route('/scim/v2/Groups', methods=['POST'])
+def create_group():
     data = request.get_json()
-    print("📥 Create User:", data)
-
-    user_id = data.get("id") or f"user-{len(users)+1}"
-    userName = data.get("userName")
-    
-    if not userName:
-        return jsonify({"error": "Missing userName"}), 400
-
-    user = {
-        "id": user_id,
-        "userName": userName,
-        "name": data.get("name", {}),
-        "emails": data.get("emails", []),
-        "active": data.get("active", True),
-        "groups": [],
-        "externalId": data.get("externalId", "")
+    group_id = data.get('id', f"group-{len(groups)+1}")
+    group = {
+        "id": group_id,
+        "displayName": data.get("displayName"),
+        "members": data.get("members", []),
+        "schemas": data.get("schemas", [])
     }
+    groups[group_id] = group
+    return jsonify(group), 201
 
-    users[user_id] = user
-
-    return jsonify(user), 201
-
-# 👥 GET /Groups – elenco gruppi
+# 🔁 Lista gruppi
 @app.route('/scim/v2/Groups', methods=['GET'])
 def list_groups():
     return jsonify({
@@ -86,55 +88,16 @@ def list_groups():
         "startIndex": 1
     })
 
-# 👥 POST /Groups – crea un nuovo gruppo
-@app.route('/scim/v2/Groups', methods=['POST'])
-def create_group():
-    data = request.get_json()
-    print("📥 Create Group:", data)
-
-    group_id = data.get('id') or f"group-{len(groups)+1}"
-    groups[group_id] = data
-
-    for member in data.get('members', []):
-        user_id = member.get('value')
-        if user_id in users and group_id not in users[user_id]["groups"]:
-            users[user_id]["groups"].append(group_id)
-
-    return jsonify(data), 201
-
-# 👥 PATCH /Groups/{id} – aggiorna membri di un gruppo
-@app.route('/scim/v2/Groups/<group_id>', methods=['PATCH'])
-def update_group(group_id):
-    if group_id not in groups:
-        abort(404, description="Group not found")
-
-    patch_data = request.get_json()
-    print("🔧 Patch Group:", patch_data)
-
-    for op in patch_data.get('Operations', []):
-        if op['op'].lower() == 'replace' and 'members' in op['value']:
-            for user in users.values():
-                if group_id in user['groups']:
-                    user['groups'].remove(group_id)
-
-            for member in op['value']['members']:
-                user_id = member.get('value')
-                if user_id in users and group_id not in users[user_id]["groups"]:
-                    users[user_id]["groups"].append(group_id)
-
-    return jsonify(groups[group_id])
-
-# 👥 DELETE /Groups/{id} – elimina un gruppo
+# 🧽 Eliminazione gruppo
 @app.route('/scim/v2/Groups/<group_id>', methods=['DELETE'])
 def delete_group(group_id):
     if group_id in groups:
-        for user in users.values():
-            if group_id in user['groups']:
-                user['groups'].remove(group_id)
         del groups[group_id]
-    return '', 204
+        return '', 204
+    else:
+        abort(404, description="Group not found")
 
-# 🔁 Run
+# 🧠 Avvio app
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host='0.0.0.0', port=port)
