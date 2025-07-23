@@ -14,7 +14,8 @@ groups = {}
 @app.before_request
 def check_auth():
     if request.path == '/scim/v2/ServiceProviderConfig':
-        return  # Questo endpoint non richiede token
+        return  # Nessuna autenticazione su questo endpoint
+
     auth_header = request.headers.get('Authorization')
     if not auth_header or not auth_header.startswith("Bearer "):
         abort(401, description="Unauthorized: Missing Bearer token")
@@ -22,6 +23,7 @@ def check_auth():
     token = auth_header.split("Bearer ")[1].strip()
     if token != VALID_BEARER_TOKEN:
         abort(401, description="Unauthorized: Invalid Bearer token")
+
 
 
 # 🔧 SCIM Service Provider Configuration
