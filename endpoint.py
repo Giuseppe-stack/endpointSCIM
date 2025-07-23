@@ -10,14 +10,19 @@ VALID_BEARER_TOKEN = "supersegreto"
 users = {}
 groups = {}
 
-# ✅ Middleware per autenticazione, ma esclude ServiceProviderConfig
+# ✅ Middleware per autenticazione
 @app.before_request
 def check_auth():
     if request.path == '/scim/v2/ServiceProviderConfig':
-        return  # Entra lo chiama senza token
+        return  # Questo endpoint non richiede token
     auth_header = request.headers.get('Authorization')
-    if not auth_header or auth_header != VALID_BEARER_TOKEN:
-        abort(401, description="Unauthorized: Invalid or missing Bearer token")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        abort(401, description="Unauthorized: Missing Bearer token")
+
+    token = auth_header.split("Bearer ")[1].strip()
+    if token != VALID_BEARER_TOKEN:
+        abort(401, description="Unauthorized: Invalid Bearer token")
+
 
 # 🔧 SCIM Service Provider Configuration
 @app.route('/scim/v2/ServiceProviderConfig', methods=['GET'])
