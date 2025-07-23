@@ -22,7 +22,7 @@ def check_auth():
 
     if not auth_header.lower().startswith("bearer"):
         print("[Auth] Errore: Header mancante o senza 'Bearer'")
-        abort(401, description="Unauthorized: Missing Bearer token")
+        abort(401, description="Unauthorized: Missing Bearer token passo 1")
 
     token = auth_header.replace("Bearer", "").strip()
     print(f"[Auth] Token estratto: '{token}'")
