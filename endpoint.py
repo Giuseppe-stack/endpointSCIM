@@ -1,48 +1,40 @@
 from flask import Flask, request, jsonify, abort
+from functools import wraps
 import os
+import uuid
 
 app = Flask(__name__)
 
-# Token segreto per autenticazione Bearer
-VALID_TOKEN = "supersegreto"
+# Token segreto da variabile d'ambiente
+VALID_TOKEN = os.environ.get("SCIM_TOKEN", "supersegreto")
 
-# Archiviazione in memoria
+# Archiviazione in memoria (per demo)
 users = {}
 groups = {}
 
-# Escludi alcune rotte da autenticazione
-EXCLUDED_PATHS = [
-    "/scim/v2/ServiceProviderConfig",
-    "/favicon.ico",
-    "/"
-]
+# Decoratore per autenticazione Bearer
 
-@app.before_request
-def check_auth():
-    if request.path in EXCLUDED_PATHS:
-        print(f"[Auth] Accesso libero a {request.path}")
-        return
+def require_auth(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if request.path in ["/", "/favicon.ico", "/scim/v2/ServiceProviderConfig"]:
+            return f(*args, **kwargs)
 
-    auth_header = request.headers.get("Authorization", "")
-    print(f"[Auth] Authorization header: {auth_header}")
+        auth_header = request.headers.get("Authorization", "")
+        if not auth_header.lower().startswith("bearer"):
+            abort(401, description="Missing Bearer token")
 
-    if not auth_header.lower().startswith("bearer"):
-        print("[Auth] Header mancante o senza 'Bearer'")
-        abort(401, description="Unauthorized: Missing Bearer token")
+        token = auth_header.replace("Bearer", "").strip()
+        if token != VALID_TOKEN:
+            abort(401, description="Invalid Bearer token")
 
-    token = auth_header.replace("Bearer", "").strip()
-    print(f"[Auth] Token estratto: '{token}'")
+        return f(*args, **kwargs)
+    return decorated
 
-    if token != VALID_TOKEN:
-        print("[Auth] Token non valido")
-        abort(401, description="Unauthorized: Invalid Bearer token")
-
-    print("[Auth] Autenticazione riuscita")
-
-# ServiceProviderConfig richiesto da Entra ID
+# Service Provider Configuration
 @app.route('/scim/v2/ServiceProviderConfig', methods=['GET'])
+@require_auth
 def service_provider_config():
-    print("[API] 🛠ServiceProviderConfig richiesto")
     return jsonify({
         "schemas": ["urn:ietf:params:scim:schemas:core:2.0:ServiceProviderConfig"],
         "patch": {"supported": True},
@@ -59,19 +51,16 @@ def service_provider_config():
         }]
     })
 
-# Creazione utente
+# Crea un nuovo utente
 @app.route('/scim/v2/Users', methods=['POST'])
+@require_auth
 def create_user():
     data = request.get_json()
-    print(f"[API] Creazione utente richiesta: {data}")
-
-    # Verifica se userName esiste già
     for user in users.values():
         if user.get("userName") == data.get("userName"):
-            print("[API] Utente già presente con userName, restituisco esistente")
             return jsonify(user), 200
 
-    user_id = data.get("id") or data.get("externalId") or f"user-{len(users)+1}"
+    user_id = data.get("id") or data.get("externalId") or str(uuid.uuid4())
     user = {
         "id": user_id,
         "userName": data.get("userName"),
@@ -81,40 +70,79 @@ def create_user():
         "schemas": data.get("schemas", [])
     }
     users[user_id] = user
-    print(f"[Data] Utente salvato: {user_id}")
     return jsonify(user), 201
 
-# Lista utenti con supporto filtro
+# Leggi o lista utenti
 @app.route('/scim/v2/Users', methods=['GET'])
+@require_auth
 def list_users():
     filter_param = request.args.get('filter')
-    print(f"[API] Lista utenti richiesta - Filtro: {filter_param}")
-
     if filter_param and "userName eq " in filter_param:
         username = filter_param.split("userName eq ")[1].strip('"')
         matched = [u for u in users.values() if u.get("userName") == username]
-        print(f"[API] Utenti trovati: {len(matched)}")
-        return jsonify({
-            "Resources": matched,
-            "totalResults": len(matched),
-            "itemsPerPage": 100,
-            "startIndex": 1
-        })
+        return jsonify({"Resources": matched, "totalResults": len(matched), "itemsPerPage": 100, "startIndex": 1})
 
-    print(f"[API] Restituisco tutti gli utenti")
-    return jsonify({
-        "Resources": list(users.values()),
-        "totalResults": len(users),
-        "itemsPerPage": 100,
-        "startIndex": 1
-    })
+    return jsonify({"Resources": list(users.values()), "totalResults": len(users), "itemsPerPage": 100, "startIndex": 1})
 
-# Creazione gruppo
+# Ottieni singolo utente
+@app.route('/scim/v2/Users/<user_id>', methods=['GET'])
+@require_auth
+def get_user(user_id):
+    user = users.get(user_id)
+    if not user:
+        abort(404, description="User not found")
+    return jsonify(user)
+
+# Aggiorna utente (PUT)
+@app.route('/scim/v2/Users/<user_id>', methods=['PUT'])
+@require_auth
+def update_user(user_id):
+    if user_id not in users:
+        abort(404, description="User not found")
+    data = request.get_json()
+    user = {
+        "id": user_id,
+        "userName": data.get("userName"),
+        "name": data.get("name", {}),
+        "emails": data.get("emails", []),
+        "externalId": data.get("externalId"),
+        "schemas": data.get("schemas", [])
+    }
+    users[user_id] = user
+    return jsonify(user)
+
+# Modifica parziale (PATCH)
+@app.route('/scim/v2/Users/<user_id>', methods=['PATCH'])
+@require_auth
+def patch_user(user_id):
+    user = users.get(user_id)
+    if not user:
+        abort(404, description="User not found")
+    data = request.get_json()
+    for op in data.get("Operations", []):
+        if op.get("op").lower() == "replace":
+            path = op.get("path")
+            value = op.get("value")
+            if path and value:
+                user[path] = value
+    users[user_id] = user
+    return jsonify(user)
+
+# Cancella utente
+@app.route('/scim/v2/Users/<user_id>', methods=['DELETE'])
+@require_auth
+def delete_user(user_id):
+    if user_id in users:
+        del users[user_id]
+        return '', 204
+    abort(404, description="User not found")
+
+# Gruppi (implementazione simile)
 @app.route('/scim/v2/Groups', methods=['POST'])
+@require_auth
 def create_group():
     data = request.get_json()
-    print(f"[API] Creazione gruppo richiesta: {data}")
-    group_id = data.get("id") or f"group-{len(groups)+1}"
+    group_id = data.get("id") or str(uuid.uuid4())
     group = {
         "id": group_id,
         "displayName": data.get("displayName"),
@@ -122,40 +150,34 @@ def create_group():
         "schemas": data.get("schemas", [])
     }
     groups[group_id] = group
-    print(f"[Data] Gruppo salvato: {group_id}")
     return jsonify(group), 201
 
-# Lista gruppi
 @app.route('/scim/v2/Groups', methods=['GET'])
+@require_auth
 def list_groups():
-    print(f"[API] Lista gruppi richiesta")
-    return jsonify({
-        "Resources": list(groups.values()),
-        "totalResults": len(groups),
-        "itemsPerPage": 100,
-        "startIndex": 1
-    })
+    return jsonify({"Resources": list(groups.values()), "totalResults": len(groups), "itemsPerPage": 100, "startIndex": 1})
 
-# Cancellazione gruppo
+@app.route('/scim/v2/Groups/<group_id>', methods=['GET'])
+@require_auth
+def get_group(group_id):
+    group = groups.get(group_id)
+    if not group:
+        abort(404, description="Group not found")
+    return jsonify(group)
+
 @app.route('/scim/v2/Groups/<group_id>', methods=['DELETE'])
+@require_auth
 def delete_group(group_id):
-    print(f"[API] Richiesta cancellazione gruppo: {group_id}")
     if group_id in groups:
         del groups[group_id]
-        print(f"[Data] Gruppo eliminato: {group_id}")
         return '', 204
-    else:
-        print(f"[Error] Gruppo non trovato: {group_id}")
-        abort(404, description="Group not found")
+    abort(404, description="Group not found")
 
-# Gestione root path e favicon (no 401)
-@app.route('/', methods=['GET'])
-@app.route('/favicon.ico', methods=['GET'])
+@app.route('/')
+@app.route('/favicon.ico')
 def root():
     return "SCIM server OK", 200
 
-# Avvio server
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
-    print(f"[Startup] SCIM server attivo su http://0.0.0.0:{port}")
     app.run(host='0.0.0.0', port=port)
