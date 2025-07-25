@@ -217,31 +217,37 @@ def patch_group(group_id):
     group = groups.get(group_id)
     if not group:
         abort(404, description="Group not found")
-    data = request.get_json()
-    
-    for op in data.get("Operations", []):
-        if op.get("op", "").lower() == "replace":
-            path = op.get("path")
-            value = op.get("value")
 
+    data = request.get_json()
+    for op in data.get("Operations", []):
+        operation = op.get("op", "").lower()
+        path = op.get("path")
+        value = op.get("value")
+
+        if operation == "replace":
             if path == "members":
-                # Sovrascrive i membri del gruppo con quelli arricchiti
-                enriched_members = []
-                for member in value:
-                    user_id = member.get("value")
-                    user = users.get(user_id, {})
-                    enriched_members.append({
-                        "value": user_id,
-                        "display": user.get("displayName", user_id),
-                        "$ref": f"{request.host_url.rstrip('/')}/scim/v2/Users/{user_id}",
-                        "type": "User"
-                    })
-                group["members"] = enriched_members
+                # Sostituisce completamente la lista dei membri
+                group["members"] = value
             elif path:
+                # Altri path specifici (non usati tipicamente da Entra ID per i gruppi)
                 group[path] = value
+            elif isinstance(value, dict):
+                # Sostituzione generale (no path): unione dizionari
+                group.update(value)
+
+        elif operation == "add" and path == "members":
+            # Aggiunge nuovi membri alla lista esistente
+            existing = {m["value"] for m in group.get("members", [])}
+            for member in value:
+                if member["value"] not in existing:
+                    group.setdefault("members", []).append(member)
+
+        elif operation == "remove" and path == "members":
+            group["members"] = []
 
     groups[group_id] = group
     return jsonify(group)
+
 
 
 @app.route('/scim/v2/Groups/<group_id>', methods=['DELETE'])
