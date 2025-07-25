@@ -217,28 +217,28 @@ def patch_group(group_id):
     group = groups.get(group_id)
     if not group:
         abort(404, description="Group not found")
-
     data = request.get_json()
+    
     for op in data.get("Operations", []):
-        operation = op.get("op", "").lower()
-        path = op.get("path")
-        value = op.get("value")
+        if op.get("op", "").lower() == "replace":
+            path = op.get("path")
+            value = op.get("value")
 
-        if operation == "replace":
-            if path:
+            if path == "members":
+                # Sovrascrive i membri del gruppo con quelli arricchiti
+                enriched_members = []
+                for member in value:
+                    user_id = member.get("value")
+                    user = users.get(user_id, {})
+                    enriched_members.append({
+                        "value": user_id,
+                        "display": user.get("displayName", user_id),
+                        "$ref": f"{request.host_url.rstrip('/')}/scim/v2/Users/{user_id}",
+                        "type": "User"
+                    })
+                group["members"] = enriched_members
+            elif path:
                 group[path] = value
-
-        elif operation == "add" and path == "members":
-            if "members" not in group:
-                group["members"] = []
-            # Evita duplicati
-            existing_ids = {m["value"] for m in group["members"] if "value" in m}
-            for member in value:
-                if member["value"] not in existing_ids:
-                    group["members"].append(member)
-
-        elif operation == "remove" and path == "members":
-            group["members"] = []
 
     groups[group_id] = group
     return jsonify(group)
