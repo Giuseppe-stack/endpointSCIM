@@ -13,7 +13,6 @@ users = {}
 groups = {}
 
 # Decoratore per autenticazione Bearer
-
 def require_auth(f):
     @wraps(f)
     def decorated(*args, **kwargs):
@@ -61,18 +60,35 @@ def create_user():
             return jsonify(user), 200
 
     user_id = data.get("id") or data.get("externalId") or str(uuid.uuid4())
+
     user = {
         "id": user_id,
         "userName": data.get("userName"),
-        "name": data.get("name", {}),
+        "active": data.get("active", True),
+        "displayName": data.get("displayName"),
+        "title": data.get("title"),
         "emails": data.get("emails", []),
+        "preferredLanguage": data.get("preferredLanguage"),
+        "name": {
+            "givenName": data.get("name", {}).get("givenName"),
+            "familyName": data.get("name", {}).get("familyName"),
+            "formatted": data.get("name", {}).get("formatted")
+        },
+        "addresses": data.get("addresses", []),
+        "phoneNumbers": data.get("phoneNumbers", []),
         "externalId": data.get("externalId"),
-        "schemas": data.get("schemas", [])
+        "schemas": data.get("schemas", []),
+        "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User": {
+            "employeeNumber": data.get("urn:ietf:params:scim:schemas:extension:enterprise:2.0:User", {}).get("employeeNumber"),
+            "department": data.get("urn:ietf:params:scim:schemas:extension:enterprise:2.0:User", {}).get("department"),
+            "manager": data.get("urn:ietf:params:scim:schemas:extension:enterprise:2.0:User", {}).get("manager")
+        }
     }
+
     users[user_id] = user
     return jsonify(user), 201
 
-# Leggi o lista utenti
+# Lista utenti
 @app.route('/scim/v2/Users', methods=['GET'])
 @require_auth
 def list_users():
@@ -103,10 +119,25 @@ def update_user(user_id):
     user = {
         "id": user_id,
         "userName": data.get("userName"),
-        "name": data.get("name", {}),
+        "active": data.get("active", True),
+        "displayName": data.get("displayName"),
+        "title": data.get("title"),
         "emails": data.get("emails", []),
+        "preferredLanguage": data.get("preferredLanguage"),
+        "name": {
+            "givenName": data.get("name", {}).get("givenName"),
+            "familyName": data.get("name", {}).get("familyName"),
+            "formatted": data.get("name", {}).get("formatted")
+        },
+        "addresses": data.get("addresses", []),
+        "phoneNumbers": data.get("phoneNumbers", []),
         "externalId": data.get("externalId"),
-        "schemas": data.get("schemas", [])
+        "schemas": data.get("schemas", []),
+        "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User": {
+            "employeeNumber": data.get("urn:ietf:params:scim:schemas:extension:enterprise:2.0:User", {}).get("employeeNumber"),
+            "department": data.get("urn:ietf:params:scim:schemas:extension:enterprise:2.0:User", {}).get("department"),
+            "manager": data.get("urn:ietf:params:scim:schemas:extension:enterprise:2.0:User", {}).get("manager")
+        }
     }
     users[user_id] = user
     return jsonify(user)
@@ -137,7 +168,7 @@ def delete_user(user_id):
         return '', 204
     abort(404, description="User not found")
 
-# Gruppi (implementazione simile)
+# Gruppi (crea, lista, ottieni, elimina)
 @app.route('/scim/v2/Groups', methods=['POST'])
 @require_auth
 def create_group():
@@ -176,7 +207,7 @@ def delete_group(group_id):
 @app.route('/')
 @app.route('/favicon.ico')
 def root():
-    return "SCIM server OK", 200
+    return "SCIM endpoint OK", 200
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
