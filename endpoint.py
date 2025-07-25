@@ -217,15 +217,32 @@ def patch_group(group_id):
     group = groups.get(group_id)
     if not group:
         abort(404, description="Group not found")
+
     data = request.get_json()
     for op in data.get("Operations", []):
-        if op.get("op").lower() == "replace":
-            path = op.get("path")
-            value = op.get("value")
+        operation = op.get("op", "").lower()
+        path = op.get("path")
+        value = op.get("value")
+
+        if operation == "replace":
             if path:
                 group[path] = value
+
+        elif operation == "add" and path == "members":
+            if "members" not in group:
+                group["members"] = []
+            # Evita duplicati
+            existing_ids = {m["value"] for m in group["members"] if "value" in m}
+            for member in value:
+                if member["value"] not in existing_ids:
+                    group["members"].append(member)
+
+        elif operation == "remove" and path == "members":
+            group["members"] = []
+
     groups[group_id] = group
     return jsonify(group)
+
 
 @app.route('/scim/v2/Groups/<group_id>', methods=['DELETE'])
 @require_auth
