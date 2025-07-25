@@ -196,6 +196,37 @@ def get_group(group_id):
         abort(404, description="Group not found")
     return jsonify(group)
 
+@app.route('/scim/v2/Groups/<group_id>', methods=['PUT'])
+@require_auth
+def update_group(group_id):
+    if group_id not in groups:
+        abort(404, description="Group not found")
+    data = request.get_json()
+    group = {
+        "id": group_id,
+        "displayName": data.get("displayName"),
+        "members": data.get("members", []),
+        "schemas": data.get("schemas", [])
+    }
+    groups[group_id] = group
+    return jsonify(group)
+
+@app.route('/scim/v2/Groups/<group_id>', methods=['PATCH'])
+@require_auth
+def patch_group(group_id):
+    group = groups.get(group_id)
+    if not group:
+        abort(404, description="Group not found")
+    data = request.get_json()
+    for op in data.get("Operations", []):
+        if op.get("op").lower() == "replace":
+            path = op.get("path")
+            value = op.get("value")
+            if path:
+                group[path] = value
+    groups[group_id] = group
+    return jsonify(group)
+
 @app.route('/scim/v2/Groups/<group_id>', methods=['DELETE'])
 @require_auth
 def delete_group(group_id):
