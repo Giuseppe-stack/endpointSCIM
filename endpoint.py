@@ -2,35 +2,46 @@ from flask import Flask, request, jsonify, abort
 from functools import wraps
 import os
 import uuid
+import json
 
 app = Flask(__name__)
 
-# Token segreto da variabile d'ambiente
 VALID_TOKEN = os.environ.get("SCIM_TOKEN", "supersegreto")
 
-# Archiviazione in memoria (per demo)
-users = {}
-groups = {}
+USERS_FILE = "users.json"
+GROUPS_FILE = "groups.json"
 
-# Decoratore per autenticazione Bearer
+# Funzioni di persistenza su file
+def load_data(file_path):
+    try:
+        with open(file_path, "r") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+def save_data(file_path, data):
+    with open(file_path, "w") as f:
+        json.dump(data, f, indent=2)
+
+users = load_data(USERS_FILE)
+groups = load_data(GROUPS_FILE)
+
+# Autenticazione Bearer
 def require_auth(f):
     @wraps(f)
     def decorated(*args, **kwargs):
         if request.path in ["/", "/favicon.ico", "/scim/v2/ServiceProviderConfig"]:
             return f(*args, **kwargs)
-
         auth_header = request.headers.get("Authorization", "")
         if not auth_header.lower().startswith("bearer"):
             abort(401, description="Missing Bearer token")
-
         token = auth_header.replace("Bearer", "").strip()
         if token != VALID_TOKEN:
             abort(401, description="Invalid Bearer token")
-
         return f(*args, **kwargs)
     return decorated
 
-# Service Provider Configuration
+# Config SCIM
 @app.route('/scim/v2/ServiceProviderConfig', methods=['GET'])
 @require_auth
 def service_provider_config():
@@ -50,7 +61,8 @@ def service_provider_config():
         }]
     })
 
-# Crea un nuovo utente
+# ------------------------- USERS -------------------------
+
 @app.route('/scim/v2/Users', methods=['POST'])
 @require_auth
 def create_user():
@@ -58,9 +70,7 @@ def create_user():
     for user in users.values():
         if user.get("userName") == data.get("userName"):
             return jsonify(user), 200
-
-    user_id = data.get("id") or data.get("externalId") or str(uuid.uuid4())
-
+    user_id = str(uuid.uuid4())
     user = {
         "id": user_id,
         "userName": data.get("userName"),
@@ -69,26 +79,17 @@ def create_user():
         "title": data.get("title"),
         "emails": data.get("emails", []),
         "preferredLanguage": data.get("preferredLanguage"),
-        "name": {
-            "givenName": data.get("name", {}).get("givenName"),
-            "familyName": data.get("name", {}).get("familyName"),
-            "formatted": data.get("name", {}).get("formatted")
-        },
+        "name": data.get("name", {}),
         "addresses": data.get("addresses", []),
         "phoneNumbers": data.get("phoneNumbers", []),
         "externalId": data.get("externalId"),
         "schemas": data.get("schemas", []),
-        "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User": {
-            "employeeNumber": data.get("urn:ietf:params:scim:schemas:extension:enterprise:2.0:User", {}).get("employeeNumber"),
-            "department": data.get("urn:ietf:params:scim:schemas:extension:enterprise:2.0:User", {}).get("department"),
-            "manager": data.get("urn:ietf:params:scim:schemas:extension:enterprise:2.0:User", {}).get("manager")
-        }
+        "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User": data.get("urn:ietf:params:scim:schemas:extension:enterprise:2.0:User", {})
     }
-
     users[user_id] = user
+    save_data(USERS_FILE, users)
     return jsonify(user), 201
 
-# Lista utenti
 @app.route('/scim/v2/Users', methods=['GET'])
 @require_auth
 def list_users():
@@ -97,83 +98,60 @@ def list_users():
         username = filter_param.split("userName eq ")[1].strip('"')
         matched = [u for u in users.values() if u.get("userName") == username]
         return jsonify({"Resources": matched, "totalResults": len(matched), "itemsPerPage": 100, "startIndex": 1})
-
     return jsonify({"Resources": list(users.values()), "totalResults": len(users), "itemsPerPage": 100, "startIndex": 1})
 
-# Ottieni singolo utente
 @app.route('/scim/v2/Users/<user_id>', methods=['GET'])
 @require_auth
 def get_user(user_id):
     user = users.get(user_id)
-    if not user:
-        abort(404, description="User not found")
-    return jsonify(user)
+    if user:
+        return jsonify(user)
+    abort(404, description="User not found")
 
-# Aggiorna utente (PUT)
 @app.route('/scim/v2/Users/<user_id>', methods=['PUT'])
 @require_auth
 def update_user(user_id):
     if user_id not in users:
         abort(404, description="User not found")
     data = request.get_json()
-    user = {
-        "id": user_id,
-        "userName": data.get("userName"),
-        "active": data.get("active", True),
-        "displayName": data.get("displayName"),
-        "title": data.get("title"),
-        "emails": data.get("emails", []),
-        "preferredLanguage": data.get("preferredLanguage"),
-        "name": {
-            "givenName": data.get("name", {}).get("givenName"),
-            "familyName": data.get("name", {}).get("familyName"),
-            "formatted": data.get("name", {}).get("formatted")
-        },
-        "addresses": data.get("addresses", []),
-        "phoneNumbers": data.get("phoneNumbers", []),
-        "externalId": data.get("externalId"),
-        "schemas": data.get("schemas", []),
-        "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User": {
-            "employeeNumber": data.get("urn:ietf:params:scim:schemas:extension:enterprise:2.0:User", {}).get("employeeNumber"),
-            "department": data.get("urn:ietf:params:scim:schemas:extension:enterprise:2.0:User", {}).get("department"),
-            "manager": data.get("urn:ietf:params:scim:schemas:extension:enterprise:2.0:User", {}).get("manager")
-        }
-    }
-    users[user_id] = user
-    return jsonify(user)
+    users[user_id].update(data)
+    save_data(USERS_FILE, users)
+    return jsonify(users[user_id])
 
-# Modifica parziale (PATCH)
 @app.route('/scim/v2/Users/<user_id>', methods=['PATCH'])
 @require_auth
 def patch_user(user_id):
-    user = users.get(user_id)
-    if not user:
+    if user_id not in users:
         abort(404, description="User not found")
     data = request.get_json()
     for op in data.get("Operations", []):
-        if op.get("op").lower() == "replace":
-            path = op.get("path")
-            value = op.get("value")
-            if path and value:
-                user[path] = value
-    users[user_id] = user
-    return jsonify(user)
+        path = op.get("path")
+        value = op.get("value")
+        if path and value:
+            keys = path.split(".")
+            ref = users[user_id]
+            for key in keys[:-1]:
+                ref = ref.setdefault(key, {})
+            ref[keys[-1]] = value
+    save_data(USERS_FILE, users)
+    return jsonify(users[user_id])
 
-# Cancella utente
 @app.route('/scim/v2/Users/<user_id>', methods=['DELETE'])
 @require_auth
 def delete_user(user_id):
     if user_id in users:
         del users[user_id]
+        save_data(USERS_FILE, users)
         return '', 204
     abort(404, description="User not found")
 
-# Gruppi (crea, lista, ottieni, elimina)
+# ------------------------- GROUPS -------------------------
+
 @app.route('/scim/v2/Groups', methods=['POST'])
 @require_auth
 def create_group():
     data = request.get_json()
-    group_id = data.get("id") or str(uuid.uuid4())
+    group_id = str(uuid.uuid4())
     group = {
         "id": group_id,
         "displayName": data.get("displayName"),
@@ -181,6 +159,7 @@ def create_group():
         "schemas": data.get("schemas", [])
     }
     groups[group_id] = group
+    save_data(GROUPS_FILE, groups)
     return jsonify(group), 201
 
 @app.route('/scim/v2/Groups', methods=['GET'])
@@ -192,9 +171,9 @@ def list_groups():
 @require_auth
 def get_group(group_id):
     group = groups.get(group_id)
-    if not group:
-        abort(404, description="Group not found")
-    return jsonify(group)
+    if group:
+        return jsonify(group)
+    abort(404, description="Group not found")
 
 @app.route('/scim/v2/Groups/<group_id>', methods=['PUT'])
 @require_auth
@@ -202,61 +181,38 @@ def update_group(group_id):
     if group_id not in groups:
         abort(404, description="Group not found")
     data = request.get_json()
-    group = {
-        "id": group_id,
-        "displayName": data.get("displayName"),
-        "members": data.get("members", []),
-        "schemas": data.get("schemas", [])
-    }
-    groups[group_id] = group
-    return jsonify(group)
+    groups[group_id].update(data)
+    save_data(GROUPS_FILE, groups)
+    return jsonify(groups[group_id])
 
 @app.route('/scim/v2/Groups/<group_id>', methods=['PATCH'])
 @require_auth
 def patch_group(group_id):
-    group = groups.get(group_id)
-    if not group:
+    if group_id not in groups:
         abort(404, description="Group not found")
-
     data = request.get_json()
     for op in data.get("Operations", []):
-        operation = op.get("op", "").lower()
         path = op.get("path")
         value = op.get("value")
-
-        if operation == "replace":
-            if path == "members":
-                # Sostituisce completamente la lista dei membri
-                group["members"] = value
-            elif path:
-                # Altri path specifici (non usati tipicamente da Entra ID per i gruppi)
-                group[path] = value
-            elif isinstance(value, dict):
-                # Sostituzione generale (no path): unione dizionari
-                group.update(value)
-
-        elif operation == "add" and path == "members":
-            # Aggiunge nuovi membri alla lista esistente
-            existing = {m["value"] for m in group.get("members", [])}
-            for member in value:
-                if member["value"] not in existing:
-                    group.setdefault("members", []).append(member)
-
-        elif operation == "remove" and path == "members":
-            group["members"] = []
-
-    groups[group_id] = group
-    return jsonify(group)
-
-
+        if path and value:
+            keys = path.split(".")
+            ref = groups[group_id]
+            for key in keys[:-1]:
+                ref = ref.setdefault(key, {})
+            ref[keys[-1]] = value
+    save_data(GROUPS_FILE, groups)
+    return jsonify(groups[group_id])
 
 @app.route('/scim/v2/Groups/<group_id>', methods=['DELETE'])
 @require_auth
 def delete_group(group_id):
     if group_id in groups:
         del groups[group_id]
+        save_data(GROUPS_FILE, groups)
         return '', 204
     abort(404, description="Group not found")
+
+# ------------------------- ROOT -------------------------
 
 @app.route('/')
 @app.route('/favicon.ico')
