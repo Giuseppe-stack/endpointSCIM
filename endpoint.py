@@ -92,7 +92,7 @@ def create_user():
             "employeeNumber": data.get("urn:ietf:params:scim:schemas:extension:enterprise:2.0:User", {}).get("employeeNumber"),
             "department": data.get("urn:ietf:params:scim:schemas:extension:enterprise:2.0:User", {}).get("department"),
             "manager": data.get("urn:ietf:params:scim:schemas:extension:enterprise:2.0:User", {}).get("manager")
-        }
+        }}
     users[user_id] = user
     save_data(USERS_FILE, users)
     return jsonify(user), 201
