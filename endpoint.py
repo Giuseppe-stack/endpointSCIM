@@ -71,7 +71,7 @@ def create_user():
         if user.get("userName") == data.get("userName"):
             return jsonify(user), 200
     user_id = str(uuid.uuid4())
-    user = {
+     user = {
         "id": user_id,
         "userName": data.get("userName"),
         "active": data.get("active", True),
@@ -79,13 +79,20 @@ def create_user():
         "title": data.get("title"),
         "emails": data.get("emails", []),
         "preferredLanguage": data.get("preferredLanguage"),
-        "name": data.get("name", {}),
+        "name": {
+            "givenName": data.get("name", {}).get("givenName"),
+            "familyName": data.get("name", {}).get("familyName"),
+            "formatted": data.get("name", {}).get("formatted")
+        },
         "addresses": data.get("addresses", []),
         "phoneNumbers": data.get("phoneNumbers", []),
         "externalId": data.get("externalId"),
         "schemas": data.get("schemas", []),
-        "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User": data.get("urn:ietf:params:scim:schemas:extension:enterprise:2.0:User", {})
-    }
+        "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User": {
+            "employeeNumber": data.get("urn:ietf:params:scim:schemas:extension:enterprise:2.0:User", {}).get("employeeNumber"),
+            "department": data.get("urn:ietf:params:scim:schemas:extension:enterprise:2.0:User", {}).get("department"),
+            "manager": data.get("urn:ietf:params:scim:schemas:extension:enterprise:2.0:User", {}).get("manager")
+        }
     users[user_id] = user
     save_data(USERS_FILE, users)
     return jsonify(user), 201
