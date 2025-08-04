@@ -27,7 +27,6 @@ def require_auth(f):
         return f(*args, **kwargs)
     return decorated
 
-# SCIM Service Provider Config
 @app.route("/scim/v2/ServiceProviderConfig", methods=["GET"])
 @require_auth
 def service_provider_config():
@@ -47,7 +46,7 @@ def service_provider_config():
         }]
     })
 
-# ----------------- USERS -----------------
+# ---------------- USERS ----------------
 
 @app.route("/scim/v2/Users", methods=["POST"])
 @require_auth
@@ -158,7 +157,7 @@ def delete_user(user_id):
         return '', 204
     abort(404, description="User not found")
 
-# ----------------- GROUPS -----------------
+# ---------------- GROUPS ----------------
 
 @app.route("/scim/v2/Groups", methods=["POST"])
 @require_auth
@@ -177,7 +176,29 @@ def create_group():
 @app.route("/scim/v2/Groups", methods=["GET"])
 @require_auth
 def list_groups():
-    return jsonify({"Resources": list(groups.values()), "totalResults": len(groups), "itemsPerPage": 100, "startIndex": 1})
+    enriched_groups = []
+
+    for group in groups.values():
+        enriched_group = group.copy()
+        enriched_members = []
+
+        for member in group.get("members", []):
+            user_id = member.get("value")
+            user = users.get(user_id)
+            if user:
+                enriched_members.append({
+                    "value": user["id"],
+                    "display": user.get("displayName", user.get("userName", "Unknown"))
+                })
+        enriched_group["members"] = enriched_members
+        enriched_groups.append(enriched_group)
+
+    return jsonify({
+        "Resources": enriched_groups,
+        "totalResults": len(enriched_groups),
+        "itemsPerPage": 100,
+        "startIndex": 1
+    })
 
 @app.route("/scim/v2/Groups/<group_id>", methods=["GET"])
 @require_auth
@@ -185,7 +206,21 @@ def get_group(group_id):
     group = groups.get(group_id)
     if not group:
         abort(404, description="Group not found")
-    return jsonify(group)
+
+    enriched_group = group.copy()
+    enriched_members = []
+
+    for member in group.get("members", []):
+        user_id = member.get("value")
+        user = users.get(user_id)
+        if user:
+            enriched_members.append({
+                "value": user["id"],
+                "display": user.get("displayName", user.get("userName", "Unknown"))
+            })
+
+    enriched_group["members"] = enriched_members
+    return jsonify(enriched_group)
 
 @app.route("/scim/v2/Groups/<group_id>", methods=["PUT"])
 @require_auth
