@@ -65,6 +65,7 @@ def create_user():
         "title": data.get("title"),
         "emails": data.get("emails", []),
         "preferredLanguage": data.get("preferredLanguage"),
+        "groupId": data.get("groupId"),  # NEW
         "name": {
             "givenName": data.get("name", {}).get("givenName"),
             "familyName": data.get("name", {}).get("familyName"),
@@ -115,6 +116,7 @@ def update_user(user_id):
         "title": data.get("title"),
         "emails": data.get("emails", []),
         "preferredLanguage": data.get("preferredLanguage"),
+        "groupId": data.get("groupId"),  # NEW
         "name": {
             "givenName": data.get("name", {}).get("givenName"),
             "familyName": data.get("name", {}).get("familyName"),
@@ -144,7 +146,7 @@ def patch_user(user_id):
         if op.get("op").lower() == "replace":
             path = op.get("path")
             value = op.get("value")
-            if path and value:
+            if path and value is not None:
                 user[path] = value
     users[user_id] = user
     return jsonify(user)
