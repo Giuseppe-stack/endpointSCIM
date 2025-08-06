@@ -27,6 +27,52 @@ def require_auth(f):
         return f(*args, **kwargs)
     return decorated
 
+def parse_roles_from_app_role_assignments(assignments):
+    if not isinstance(assignments, list):
+        return []
+
+    roles = []
+    for assignment in assignments:
+        role_display = assignment.get("displayName") or assignment.get("value") or assignment.get("display")
+        if role_display:
+            roles.append({
+                "primary": False,
+                "type": "WindowsAzureActiveDirectoryRole",
+                "display": role_display,
+                "value": role_display
+            })
+    return roles
+
+def build_user(data, user_id):
+    app_role_assignments = data.get("appRoleAssignments", [])
+    mapped_roles = parse_roles_from_app_role_assignments(app_role_assignments)
+
+    return {
+        "id": user_id,
+        "userName": data.get("userName"),
+        "active": data.get("active", True),
+        "displayName": data.get("displayName"),
+        "title": data.get("title"),
+        "emails": data.get("emails", []),
+        "preferredLanguage": data.get("preferredLanguage"),
+        "groupId": data.get("groupId"),
+        "roles": mapped_roles,
+        "name": {
+            "givenName": data.get("name", {}).get("givenName"),
+            "familyName": data.get("name", {}).get("familyName"),
+            "formatted": data.get("name", {}).get("formatted")
+        },
+        "addresses": data.get("addresses", []),
+        "phoneNumbers": data.get("phoneNumbers", []),
+        "externalId": data.get("externalId"),
+        "schemas": data.get("schemas", []),
+        "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User": {
+            "employeeNumber": data.get("urn:ietf:params:scim:schemas:extension:enterprise:2.0:User", {}).get("employeeNumber"),
+            "department": data.get("urn:ietf:params:scim:schemas:extension:enterprise:2.0:User", {}).get("department"),
+            "manager": data.get("urn:ietf:params:scim:schemas:extension:enterprise:2.0:User", {}).get("manager")
+        }
+    }
+
 @app.route("/scim/v2/ServiceProviderConfig", methods=["GET"])
 @require_auth
 def service_provider_config():
@@ -45,35 +91,6 @@ def service_provider_config():
             "specUri": "http://www.rfc-editor.org/info/rfc6750"
         }]
     })
-
-# ---------------- USERS ----------------
-
-def build_user(data, user_id):
-    return {
-        "id": user_id,
-        "userName": data.get("userName"),
-        "active": data.get("active", True),
-        "displayName": data.get("displayName"),
-        "title": data.get("title"),
-        "emails": data.get("emails", []),
-        "preferredLanguage": data.get("preferredLanguage"),
-        "groupId": data.get("groupId"),
-        "roles": data.get("roles", []),
-        "name": {
-            "givenName": data.get("name", {}).get("givenName"),
-            "familyName": data.get("name", {}).get("familyName"),
-            "formatted": data.get("name", {}).get("formatted")
-        },
-        "addresses": data.get("addresses", []),
-        "phoneNumbers": data.get("phoneNumbers", []),
-        "externalId": data.get("externalId"),
-        "schemas": data.get("schemas", []),
-        "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User": {
-            "employeeNumber": data.get("urn:ietf:params:scim:schemas:extension:enterprise:2.0:User", {}).get("employeeNumber"),
-            "department": data.get("urn:ietf:params:scim:schemas:extension:enterprise:2.0:User", {}).get("department"),
-            "manager": data.get("urn:ietf:params:scim:schemas:extension:enterprise:2.0:User", {}).get("manager")
-        }
-    }
 
 @app.route("/scim/v2/Users", methods=["POST"])
 @require_auth
@@ -138,8 +155,6 @@ def delete_user(user_id):
         del users[user_id]
         return '', 204
     abort(404, description="User not found")
-
-# ---------------- GROUPS ----------------
 
 @app.route("/scim/v2/Groups", methods=["POST"])
 @require_auth
