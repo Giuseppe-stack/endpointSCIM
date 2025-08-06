@@ -27,6 +27,68 @@ def require_auth(f):
         return f(*args, **kwargs)
     return decorated
 
+# ID sequenziale per i gruppi
+def generate_group_id():
+    num = 1
+    while True:
+        group_id = f"group{num:03d}"
+        if group_id not in groups:
+            return group_id
+        num += 1
+
+def assign_user_to_groups_by_roles(user_id, user):
+    user_roles = user.get("roles", [])
+    for role in user_roles:
+        role_name = role.get("displayName") or role.get("value")
+        if not role_name:
+            continue
+
+        existing_group = next((g for g in groups.values() if g.get("displayName") == role_name), None)
+        if not existing_group:
+            group_id = generate_group_id()
+            groups[group_id] = {
+                "id": group_id,
+                "displayName": role_name,
+                "schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"],
+                "members": [{
+                    "value": user_id,
+                    "display": user.get("displayName", user.get("userName"))
+                }]
+            }
+        else:
+            members = existing_group.setdefault("members", [])
+            if not any(m["value"] == user_id for m in members):
+                members.append({
+                    "value": user_id,
+                    "display": user.get("displayName", user.get("userName"))
+                })
+
+def build_user(data, user_id):
+    return {
+        "id": user_id,
+        "userName": data.get("userName"),
+        "active": data.get("active", True),
+        "displayName": data.get("displayName"),
+        "title": data.get("title"),
+        "emails": data.get("emails", []),
+        "preferredLanguage": data.get("preferredLanguage"),
+        "roles": data.get("roles", []),
+        "name": {
+            "givenName": data.get("name", {}).get("givenName"),
+            "familyName": data.get("name", {}).get("familyName"),
+            "formatted": data.get("name", {}).get("formatted")
+        },
+        "addresses": data.get("addresses", []),
+        "phoneNumbers": data.get("phoneNumbers", []),
+        "externalId": data.get("externalId"),
+        "schemas": data.get("schemas", []),
+        "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User": {
+            "employeeNumber": data.get("urn:ietf:params:scim:schemas:extension:enterprise:2.0:User", {}).get("employeeNumber"),
+            "department": data.get("urn:ietf:params:scim:schemas:extension:enterprise:2.0:User", {}).get("department"),
+            "manager": data.get("urn:ietf:params:scim:schemas:extension:enterprise:2.0:User", {}).get("manager")
+        }
+    }
+
 @app.route("/scim/v2/ServiceProviderConfig", methods=["GET"])
 @require_auth
 def service_provider_config():
@@ -48,33 +110,6 @@ def service_provider_config():
 
 # ---------------- USERS ----------------
 
-def build_user(data, user_id):
-    return {
-        "id": user_id,
-        "userName": data.get("userName"),
-        "active": data.get("active", True),
-        "displayName": data.get("displayName"),
-        "title": data.get("title"),
-        "emails": data.get("emails", []),
-        "preferredLanguage": data.get("preferredLanguage"),
-        "groupId": data.get("groupId"),
-        "roles": data.get("roles", []),
-        "name": {
-            "givenName": data.get("name", {}).get("givenName"),
-            "familyName": data.get("name", {}).get("familyName"),
-            "formatted": data.get("name", {}).get("formatted")
-        },
-        "addresses": data.get("addresses", []),
-        "phoneNumbers": data.get("phoneNumbers", []),
-        "externalId": data.get("externalId"),
-        "schemas": data.get("schemas", []),
-        "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User": {
-            "employeeNumber": data.get("urn:ietf:params:scim:schemas:extension:enterprise:2.0:User", {}).get("employeeNumber"),
-            "department": data.get("urn:ietf:params:scim:schemas:extension:enterprise:2.0:User", {}).get("department"),
-            "manager": data.get("urn:ietf:params:scim:schemas:extension:enterprise:2.0:User", {}).get("manager")
-        }
-    }
-
 @app.route("/scim/v2/Users", methods=["POST"])
 @require_auth
 def create_user():
@@ -85,6 +120,7 @@ def create_user():
     user_id = data.get("id") or data.get("externalId") or str(uuid.uuid4())
     user = build_user(data, user_id)
     users[user_id] = user
+    assign_user_to_groups_by_roles(user_id, user)
     return jsonify(user), 201
 
 @app.route("/scim/v2/Users", methods=["GET"])
@@ -113,6 +149,9 @@ def update_user(user_id):
     data = request.get_json()
     user = build_user(data, user_id)
     users[user_id] = user
+    for group in groups.values():
+        group["members"] = [m for m in group.get("members", []) if m["value"] != user_id]
+    assign_user_to_groups_by_roles(user_id, user)
     return jsonify(user)
 
 @app.route("/scim/v2/Users/<user_id>", methods=["PATCH"])
@@ -123,12 +162,17 @@ def patch_user(user_id):
         abort(404, description="User not found")
     data = request.get_json()
     for op in data.get("Operations", []):
-        if op.get("op").lower() == "replace":
+        if op.get("op", "").lower() == "replace":
             path = op.get("path")
             value = op.get("value")
-            if path and value is not None:
+            if path:
                 user[path] = value
+            elif isinstance(value, dict):
+                user.update(value)
     users[user_id] = user
+    for group in groups.values():
+        group["members"] = [m for m in group.get("members", []) if m["value"] != user_id]
+    assign_user_to_groups_by_roles(user_id, user)
     return jsonify(user)
 
 @app.route("/scim/v2/Users/<user_id>", methods=["DELETE"])
@@ -136,6 +180,8 @@ def patch_user(user_id):
 def delete_user(user_id):
     if user_id in users:
         del users[user_id]
+        for group in groups.values():
+            group["members"] = [m for m in group.get("members", []) if m["value"] != user_id]
         return '', 204
     abort(404, description="User not found")
 
@@ -145,7 +191,7 @@ def delete_user(user_id):
 @require_auth
 def create_group():
     data = request.get_json()
-    group_id = data.get("id") or str(uuid.uuid4())
+    group_id = data.get("id") or generate_group_id()
     group = {
         "id": group_id,
         "displayName": data.get("displayName"),
@@ -162,8 +208,9 @@ def list_groups():
     for group in groups.values():
         enriched_group = group.copy()
         enriched_members = []
-        for user in users.values():
-            if user.get("groupId") == group["id"]:
+        for member in group.get("members", []):
+            user = users.get(member["value"])
+            if user:
                 enriched_members.append({
                     "value": user["id"],
                     "display": user.get("displayName", user.get("userName"))
@@ -185,8 +232,9 @@ def get_group(group_id):
         abort(404, description="Group not found")
     enriched_group = group.copy()
     enriched_members = []
-    for user in users.values():
-        if user.get("groupId") == group["id"]:
+    for member in group.get("members", []):
+        user = users.get(member["value"])
+        if user:
             enriched_members.append({
                 "value": user["id"],
                 "display": user.get("displayName", user.get("userName"))
