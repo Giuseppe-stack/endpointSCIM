@@ -36,29 +36,13 @@ def generate_group_id():
             return group_id
         num += 1
 
-# 🔁 Parsing appRoleAssignments → SCIM roles
-def parse_roles_from_app_role_assignments(assignments):
-    if not isinstance(assignments, list):
-        return []
-
-    roles = []
-    for assignment in assignments:
-        role_display = assignment.get("displayName") or assignment.get("value") or assignment.get("display")
-        if role_display:
-            roles.append({
-                "primary": False,
-                "type": "WindowsAzureActiveDirectoryRole",
-                "display": role_display,
-                "value": role_display
-            })
-    return roles
-
 def assign_user_to_groups_by_roles(user_id, user):
     user_roles = user.get("roles", [])
     for role in user_roles:
-        role_name = role.get("displayName") or role.get("display") or role.get("value")
+        role_name = role.get("display") or role.get("value") or role.get("displayName")
         if not role_name:
             continue
+
         existing_group = next((g for g in groups.values() if g.get("displayName") == role_name), None)
         if not existing_group:
             group_id = generate_group_id()
@@ -68,7 +52,7 @@ def assign_user_to_groups_by_roles(user_id, user):
                 "schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"],
                 "members": [{
                     "value": user_id,
-                    "display": user.get("displayName", user.get("userName"))
+                    "display": user.get("displayName") or user.get("userName") or "unknown"
                 }]
             }
         else:
@@ -76,13 +60,10 @@ def assign_user_to_groups_by_roles(user_id, user):
             if not any(m["value"] == user_id for m in members):
                 members.append({
                     "value": user_id,
-                    "display": user.get("displayName", user.get("userName"))
+                    "display": user.get("displayName") or user.get("userName") or "unknown"
                 })
 
-# ✅ Costruzione utente con parsing appRoleAssignments
 def build_user(data, user_id):
-    roles = parse_roles_from_app_role_assignments(data.get("appRoleAssignments", [])) or data.get("roles", [])
-
     return {
         "id": user_id,
         "userName": data.get("userName"),
@@ -91,7 +72,7 @@ def build_user(data, user_id):
         "title": data.get("title"),
         "emails": data.get("emails", []),
         "preferredLanguage": data.get("preferredLanguage"),
-        "roles": roles,
+        "roles": data.get("roles", []),
         "name": {
             "givenName": data.get("name", {}).get("givenName"),
             "familyName": data.get("name", {}).get("familyName"),
@@ -126,8 +107,6 @@ def service_provider_config():
             "specUri": "http://www.rfc-editor.org/info/rfc6750"
         }]
     })
-
-# ---------------- USERS ----------------
 
 @app.route("/scim/v2/Users", methods=["POST"])
 @require_auth
@@ -204,22 +183,6 @@ def delete_user(user_id):
         return '', 204
     abort(404, description="User not found")
 
-# ---------------- GROUPS ----------------
-
-@app.route("/scim/v2/Groups", methods=["POST"])
-@require_auth
-def create_group():
-    data = request.get_json()
-    group_id = data.get("id") or generate_group_id()
-    group = {
-        "id": group_id,
-        "displayName": data.get("displayName"),
-        "members": data.get("members", []),
-        "schemas": data.get("schemas", [])
-    }
-    groups[group_id] = group
-    return jsonify(group), 201
-
 @app.route("/scim/v2/Groups", methods=["GET"])
 @require_auth
 def list_groups():
@@ -232,7 +195,7 @@ def list_groups():
             if user:
                 enriched_members.append({
                     "value": user["id"],
-                    "display": user.get("displayName", user.get("userName"))
+                    "display": user.get("displayName") or user.get("userName") or "unknown"
                 })
         enriched_group["members"] = enriched_members
         enriched_groups.append(enriched_group)
@@ -242,75 +205,6 @@ def list_groups():
         "itemsPerPage": 100,
         "startIndex": 1
     })
-
-@app.route("/scim/v2/Groups/<group_id>", methods=["GET"])
-@require_auth
-def get_group(group_id):
-    group = groups.get(group_id)
-    if not group:
-        abort(404, description="Group not found")
-    enriched_group = group.copy()
-    enriched_members = []
-    for member in group.get("members", []):
-        user = users.get(member["value"])
-        if user:
-            enriched_members.append({
-                "value": user["id"],
-                "display": user.get("displayName", user.get("userName"))
-            })
-    enriched_group["members"] = enriched_members
-    return jsonify(enriched_group)
-
-@app.route("/scim/v2/Groups/<group_id>", methods=["PUT"])
-@require_auth
-def update_group(group_id):
-    if group_id not in groups:
-        abort(404, description="Group not found")
-    data = request.get_json()
-    group = {
-        "id": group_id,
-        "displayName": data.get("displayName"),
-        "members": data.get("members", []),
-        "schemas": data.get("schemas", [])
-    }
-    groups[group_id] = group
-    return jsonify(group)
-
-@app.route("/scim/v2/Groups/<group_id>", methods=["PATCH"])
-@require_auth
-def patch_group(group_id):
-    group = groups.get(group_id)
-    if not group:
-        abort(404, description="Group not found")
-    data = request.get_json()
-    for op in data.get("Operations", []):
-        operation = op.get("op", "").lower()
-        path = op.get("path")
-        value = op.get("value")
-        if operation == "replace":
-            if path == "members":
-                group["members"] = value
-            elif path:
-                group[path] = value
-            elif isinstance(value, dict):
-                group.update(value)
-        elif operation == "add" and path == "members":
-            existing = {m["value"] for m in group.get("members", [])}
-            for member in value:
-                if member["value"] not in existing:
-                    group.setdefault("members", []).append(member)
-        elif operation == "remove" and path == "members":
-            group["members"] = []
-    groups[group_id] = group
-    return jsonify(group)
-
-@app.route("/scim/v2/Groups/<group_id>", methods=["DELETE"])
-@require_auth
-def delete_group(group_id):
-    if group_id in groups:
-        del groups[group_id]
-        return '', 204
-    abort(404, description="Group not found")
 
 @app.route("/")
 def root():
