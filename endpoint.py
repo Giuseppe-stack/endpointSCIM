@@ -36,13 +36,29 @@ def generate_group_id():
             return group_id
         num += 1
 
+# 🔁 Parsing appRoleAssignments → SCIM roles
+def parse_roles_from_app_role_assignments(assignments):
+    if not isinstance(assignments, list):
+        return []
+
+    roles = []
+    for assignment in assignments:
+        role_display = assignment.get("displayName") or assignment.get("value") or assignment.get("display")
+        if role_display:
+            roles.append({
+                "primary": False,
+                "type": "WindowsAzureActiveDirectoryRole",
+                "display": role_display,
+                "value": role_display
+            })
+    return roles
+
 def assign_user_to_groups_by_roles(user_id, user):
     user_roles = user.get("roles", [])
     for role in user_roles:
-        role_name = role.get("displayName") or role.get("value")
+        role_name = role.get("displayName") or role.get("display") or role.get("value")
         if not role_name:
             continue
-
         existing_group = next((g for g in groups.values() if g.get("displayName") == role_name), None)
         if not existing_group:
             group_id = generate_group_id()
@@ -63,7 +79,10 @@ def assign_user_to_groups_by_roles(user_id, user):
                     "display": user.get("displayName", user.get("userName"))
                 })
 
+# ✅ Costruzione utente con parsing appRoleAssignments
 def build_user(data, user_id):
+    roles = parse_roles_from_app_role_assignments(data.get("appRoleAssignments", [])) or data.get("roles", [])
+
     return {
         "id": user_id,
         "userName": data.get("userName"),
@@ -72,7 +91,7 @@ def build_user(data, user_id):
         "title": data.get("title"),
         "emails": data.get("emails", []),
         "preferredLanguage": data.get("preferredLanguage"),
-        "roles": data.get("roles", []),
+        "roles": roles,
         "name": {
             "givenName": data.get("name", {}).get("givenName"),
             "familyName": data.get("name", {}).get("familyName"),
