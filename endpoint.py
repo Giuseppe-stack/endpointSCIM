@@ -48,16 +48,8 @@ def service_provider_config():
 
 # ---------------- USERS ----------------
 
-@app.route("/scim/v2/Users", methods=["POST"])
-@require_auth
-def create_user():
-    data = request.get_json()
-    for user in users.values():
-        if user.get("userName") == data.get("userName"):
-            return jsonify(user), 200
-
-    user_id = data.get("id") or data.get("externalId") or str(uuid.uuid4())
-    user = {
+def build_user(data, user_id):
+    return {
         "id": user_id,
         "userName": data.get("userName"),
         "active": data.get("active", True),
@@ -66,6 +58,7 @@ def create_user():
         "emails": data.get("emails", []),
         "preferredLanguage": data.get("preferredLanguage"),
         "groupId": data.get("groupId"),
+        "roles": data.get("roles", []),
         "name": {
             "givenName": data.get("name", {}).get("givenName"),
             "familyName": data.get("name", {}).get("familyName"),
@@ -81,6 +74,16 @@ def create_user():
             "manager": data.get("urn:ietf:params:scim:schemas:extension:enterprise:2.0:User", {}).get("manager")
         }
     }
+
+@app.route("/scim/v2/Users", methods=["POST"])
+@require_auth
+def create_user():
+    data = request.get_json()
+    for user in users.values():
+        if user.get("userName") == data.get("userName"):
+            return jsonify(user), 200
+    user_id = data.get("id") or data.get("externalId") or str(uuid.uuid4())
+    user = build_user(data, user_id)
     users[user_id] = user
     return jsonify(user), 201
 
@@ -108,30 +111,7 @@ def update_user(user_id):
     if user_id not in users:
         abort(404, description="User not found")
     data = request.get_json()
-    user = {
-        "id": user_id,
-        "userName": data.get("userName"),
-        "active": data.get("active", True),
-        "displayName": data.get("displayName"),
-        "title": data.get("title"),
-        "emails": data.get("emails", []),
-        "preferredLanguage": data.get("preferredLanguage"),
-        "groupId": data.get("groupId"),
-        "name": {
-            "givenName": data.get("name", {}).get("givenName"),
-            "familyName": data.get("name", {}).get("familyName"),
-            "formatted": data.get("name", {}).get("formatted")
-        },
-        "addresses": data.get("addresses", []),
-        "phoneNumbers": data.get("phoneNumbers", []),
-        "externalId": data.get("externalId"),
-        "schemas": data.get("schemas", []),
-        "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User": {
-            "employeeNumber": data.get("urn:ietf:params:scim:schemas:extension:enterprise:2.0:User", {}).get("employeeNumber"),
-            "department": data.get("urn:ietf:params:scim:schemas:extension:enterprise:2.0:User", {}).get("department"),
-            "manager": data.get("urn:ietf:params:scim:schemas:extension:enterprise:2.0:User", {}).get("manager")
-        }
-    }
+    user = build_user(data, user_id)
     users[user_id] = user
     return jsonify(user)
 
@@ -179,21 +159,17 @@ def create_group():
 @require_auth
 def list_groups():
     enriched_groups = []
-
     for group in groups.values():
         enriched_group = group.copy()
         enriched_members = []
-
         for user in users.values():
             if user.get("groupId") == group["id"]:
                 enriched_members.append({
                     "value": user["id"],
                     "display": user.get("displayName", user.get("userName"))
                 })
-
         enriched_group["members"] = enriched_members
         enriched_groups.append(enriched_group)
-
     return jsonify({
         "Resources": enriched_groups,
         "totalResults": len(enriched_groups),
@@ -207,17 +183,14 @@ def get_group(group_id):
     group = groups.get(group_id)
     if not group:
         abort(404, description="Group not found")
-
     enriched_group = group.copy()
     enriched_members = []
-
     for user in users.values():
         if user.get("groupId") == group["id"]:
             enriched_members.append({
                 "value": user["id"],
                 "display": user.get("displayName", user.get("userName"))
             })
-
     enriched_group["members"] = enriched_members
     return jsonify(enriched_group)
 
@@ -242,13 +215,11 @@ def patch_group(group_id):
     group = groups.get(group_id)
     if not group:
         abort(404, description="Group not found")
-
     data = request.get_json()
     for op in data.get("Operations", []):
         operation = op.get("op", "").lower()
         path = op.get("path")
         value = op.get("value")
-
         if operation == "replace":
             if path == "members":
                 group["members"] = value
@@ -256,16 +227,13 @@ def patch_group(group_id):
                 group[path] = value
             elif isinstance(value, dict):
                 group.update(value)
-
         elif operation == "add" and path == "members":
             existing = {m["value"] for m in group.get("members", [])}
             for member in value:
                 if member["value"] not in existing:
                     group.setdefault("members", []).append(member)
-
         elif operation == "remove" and path == "members":
             group["members"] = []
-
     groups[group_id] = group
     return jsonify(group)
 
