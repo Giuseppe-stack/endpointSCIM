@@ -27,7 +27,6 @@ def require_auth(f):
         return f(*args, **kwargs)
     return decorated
 
-# ID sequenziale per i gruppi
 def generate_group_id():
     num = 1
     while True:
@@ -42,7 +41,6 @@ def assign_user_to_groups_by_roles(user_id, user):
         role_name = role.get("display") or role.get("value") or role.get("displayName")
         if not role_name:
             continue
-
         existing_group = next((g for g in groups.values() if g.get("displayName") == role_name), None)
         if not existing_group:
             group_id = generate_group_id()
@@ -89,24 +87,7 @@ def build_user(data, user_id):
         }
     }
 
-@app.route("/scim/v2/ServiceProviderConfig", methods=["GET"])
-@require_auth
-def service_provider_config():
-    return jsonify({
-        "schemas": ["urn:ietf:params:scim:schemas:core:2.0:ServiceProviderConfig"],
-        "patch": {"supported": True},
-        "bulk": {"supported": False},
-        "filter": {"supported": True, "maxResults": 200},
-        "changePassword": {"supported": False},
-        "sort": {"supported": True},
-        "etag": {"supported": False},
-        "authenticationSchemes": [{
-            "type": "oauthbearertoken",
-            "name": "OAuth Bearer Token",
-            "description": "SCIM Bearer Token Authentication",
-            "specUri": "http://www.rfc-editor.org/info/rfc6750"
-        }]
-    })
+# --- User Routes ---
 
 @app.route("/scim/v2/Users", methods=["POST"])
 @require_auth
@@ -183,28 +164,82 @@ def delete_user(user_id):
         return '', 204
     abort(404, description="User not found")
 
+# --- Group Routes ---
+
 @app.route("/scim/v2/Groups", methods=["GET"])
 @require_auth
 def list_groups():
-    enriched_groups = []
-    for group in groups.values():
-        enriched_group = group.copy()
-        enriched_members = []
-        for member in group.get("members", []):
-            user = users.get(member["value"])
-            if user:
-                enriched_members.append({
-                    "value": user["id"],
-                    "display": user.get("displayName") or user.get("userName") or "unknown"
-                })
-        enriched_group["members"] = enriched_members
-        enriched_groups.append(enriched_group)
     return jsonify({
-        "Resources": enriched_groups,
-        "totalResults": len(enriched_groups),
+        "Resources": list(groups.values()),
+        "totalResults": len(groups),
         "itemsPerPage": 100,
         "startIndex": 1
     })
+
+@app.route("/scim/v2/Groups/<group_id>", methods=["GET"])
+@require_auth
+def get_group(group_id):
+    group = groups.get(group_id)
+    if not group:
+        abort(404, description="Group not found")
+    return jsonify(group)
+
+@app.route("/scim/v2/Groups", methods=["POST"])
+@require_auth
+def create_group():
+    data = request.get_json()
+    group_id = data.get("id") or generate_group_id()
+    if group_id in groups:
+        abort(409, description="Group already exists")
+    group = {
+        "id": group_id,
+        "displayName": data.get("displayName"),
+        "members": data.get("members", []),
+        "schemas": data.get("schemas", ["urn:ietf:params:scim:schemas:core:2.0:Group"])
+    }
+    groups[group_id] = group
+    return jsonify(group), 201
+
+@app.route("/scim/v2/Groups/<group_id>", methods=["PUT"])
+@require_auth
+def update_group(group_id):
+    if group_id not in groups:
+        abort(404, description="Group not found")
+    data = request.get_json()
+    group = {
+        "id": group_id,
+        "displayName": data.get("displayName"),
+        "members": data.get("members", []),
+        "schemas": data.get("schemas", ["urn:ietf:params:scim:schemas:core:2.0:Group"])
+    }
+    groups[group_id] = group
+    return jsonify(group)
+
+@app.route("/scim/v2/Groups/<group_id>", methods=["PATCH"])
+@require_auth
+def patch_group(group_id):
+    group = groups.get(group_id)
+    if not group:
+        abort(404, description="Group not found")
+    data = request.get_json()
+    for op in data.get("Operations", []):
+        if op.get("op") == "replace":
+            path = op.get("path")
+            value = op.get("value")
+            if path:
+                group[path] = value
+            elif isinstance(value, dict):
+                group.update(value)
+    groups[group_id] = group
+    return jsonify(group)
+
+@app.route("/scim/v2/Groups/<group_id>", methods=["DELETE"])
+@require_auth
+def delete_group(group_id):
+    if group_id in groups:
+        del groups[group_id]
+        return '', 204
+    abort(404, description="Group not found")
 
 @app.route("/")
 def root():
