@@ -35,6 +35,15 @@ def generate_group_id():
             return group_id
         num += 1
 
+def enrich_user_with_groups(user):
+    user_groups = []
+    for group in groups.values():
+        members = group.get("members", [])
+        if any(m.get("value") == user["id"] for m in members):
+            user_groups.append({"value": group["id"], "display": group["displayName"]})
+    user["groups"] = user_groups
+    return user
+
 def update_groups_membership_from_user(user_id, user):
     # Rimuovi user da tutti i gruppi
     for group in groups.values():
@@ -72,17 +81,16 @@ def update_users_groups_from_group(group):
     # Rimuovi il group_name da tutti gli utenti che non sono più membri
     for user_id, user in users.items():
         groups_list = user.get("groups", [])
-        if user_id not in member_ids and group_name in groups_list:
-            groups_list.remove(group_name)
-            user["groups"] = groups_list
+        # Qui user["groups"] è lista di dict, quindi rimuoviamo group dict con display uguale
+        user["groups"] = [g for g in groups_list if g.get("display") != group_name]
 
     # Aggiungi il group_name agli utenti membri
     for member_id in member_ids:
         if member_id in users:
             user = users[member_id]
             groups_list = user.get("groups", [])
-            if group_name not in groups_list:
-                groups_list.append(group_name)
+            if not any(g.get("display") == group_name for g in groups_list):
+                groups_list.append({"value": group["id"], "display": group_name})
                 user["groups"] = groups_list
 
 def build_user(data, user_id):
@@ -95,7 +103,7 @@ def build_user(data, user_id):
         "emails": data.get("emails", []),
         "preferredLanguage": data.get("preferredLanguage"),
         "roles": data.get("roles", []),
-        "groups": data.get("groups", []),  # aggiunto per sicurezza, ma aggiornato dinamicamente
+        "groups": data.get("groups", []),  # per sicurezza, ma aggiornato dinamicamente
         "name": {
             "givenName": data.get("name", {}).get("givenName"),
             "familyName": data.get("name", {}).get("familyName"),
@@ -120,13 +128,13 @@ def create_user():
     data = request.get_json()
     for user in users.values():
         if user.get("userName") == data.get("userName"):
+            user = enrich_user_with_groups(user)
             return jsonify(user), 200
     user_id = data.get("id") or data.get("externalId") or str(uuid.uuid4())
     user = build_user(data, user_id)
     users[user_id] = user
     update_groups_membership_from_user(user_id, user)
-    # Aggiorna groups nel profilo utente basandosi sui gruppi reali
-    user["groups"] = [g["displayName"] for g in groups.values() if any(m["value"] == user_id for m in g.get("members", []))]
+    user = enrich_user_with_groups(user)
     return jsonify(user), 201
 
 @app.route("/scim/v2/Users", methods=["GET"])
@@ -135,9 +143,10 @@ def list_users():
     filter_param = request.args.get('filter')
     if filter_param and "userName eq " in filter_param:
         username = filter_param.split("userName eq ")[1].strip('"')
-        matched = [u for u in users.values() if u.get("userName") == username]
+        matched = [enrich_user_with_groups(u) for u in users.values() if u.get("userName") == username]
         return jsonify({"Resources": matched, "totalResults": len(matched), "itemsPerPage": 100, "startIndex": 1})
-    return jsonify({"Resources": list(users.values()), "totalResults": len(users), "itemsPerPage": 100, "startIndex": 1})
+    all_users = [enrich_user_with_groups(u) for u in users.values()]
+    return jsonify({"Resources": all_users, "totalResults": len(users), "itemsPerPage": 100, "startIndex": 1})
 
 @app.route("/scim/v2/Users/<user_id>", methods=["GET"])
 @require_auth
@@ -145,8 +154,7 @@ def get_user(user_id):
     user = users.get(user_id)
     if not user:
         abort(404, description="User not found")
-    # Aggiorna groups dinamicamente
-    user["groups"] = [g["displayName"] for g in groups.values() if any(m["value"] == user_id for m in g.get("members", []))]
+    user = enrich_user_with_groups(user)
     return jsonify(user)
 
 @app.route("/scim/v2/Users/<user_id>", methods=["PUT"])
@@ -158,7 +166,7 @@ def update_user(user_id):
     user = build_user(data, user_id)
     users[user_id] = user
     update_groups_membership_from_user(user_id, user)
-    user["groups"] = [g["displayName"] for g in groups.values() if any(m["value"] == user_id for m in g.get("members", []))]
+    user = enrich_user_with_groups(user)
     return jsonify(user)
 
 @app.route("/scim/v2/Users/<user_id>", methods=["PATCH"])
@@ -178,7 +186,7 @@ def patch_user(user_id):
                 user.update(value)
     users[user_id] = user
     update_groups_membership_from_user(user_id, user)
-    user["groups"] = [g["displayName"] for g in groups.values() if any(m["value"] == user_id for m in g.get("members", []))]
+    user = enrich_user_with_groups(user)
     return jsonify(user)
 
 @app.route("/scim/v2/Users/<user_id>", methods=["DELETE"])
@@ -244,45 +252,35 @@ def update_group(group_id):
     update_users_groups_from_group(group)
     return jsonify(group)
 
-@app.route("/scim/v2/Groups/<group_id>", methods=["PATCH"])
-@require_auth
-def patch_group(group_id):
-    group = groups.get(group_id)
-    if not group:
-        abort(404, description="Group not found")
-    data = request.get_json()
-    for op in data.get("Operations", []):
-        if op.get("op").lower() == "replace":
-            path = op.get("path")
-            value = op.get("value")
-            if path:
-                group[path] = value
-            elif isinstance(value, dict):
-                group.update(value)
-    groups[group_id] = group
-    update_users_groups_from_group(group)
-    return jsonify(group)
-
 @app.route("/scim/v2/Groups/<group_id>", methods=["DELETE"])
 @require_auth
 def delete_group(group_id):
     if group_id in groups:
         del groups[group_id]
-        # Rimuovi questo gruppo da tutti gli utenti
-        group_name = None
-        # Se vuoi puoi trovare il groupName cancellato, ma qui lo eliminiamo direttamente
         for user in users.values():
-            groups_list = user.get("groups", [])
-            if group_name and group_name in groups_list:
-                groups_list.remove(group_name)
-                user["groups"] = groups_list
+            user["groups"] = [g for g in user.get("groups", []) if g.get("value") != group_id]
         return '', 204
     abort(404, description="Group not found")
 
+# --- Service Provider Config ---
+
+@app.route("/scim/v2/ServiceProviderConfig")
+def service_provider_config():
+    return jsonify({
+        "schemas": ["urn:ietf:params:scim:schemas:core:2.0:ServiceProviderConfig"],
+        "patch": {"supported": True},
+        "bulk": {"supported": False},
+        "filter": {"supported": True, "maxResults": 200},
+        "changePassword": {"supported": False},
+        "sort": {"supported": True},
+        "etag": {"supported": False}
+    })
+
+# --- Root ---
+
 @app.route("/")
 def root():
-    return "SCIM endpoint OK", 200
+    return "SCIM API"
 
-if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host='0.0.0.0', port=port)
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000)
