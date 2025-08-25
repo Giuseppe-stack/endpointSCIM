@@ -12,7 +12,7 @@ groups = {}
 # Token di autenticazione
 VALID_TOKEN = os.environ.get("SCIM_TOKEN", "supersegreto")
 
-# Decoratore per autenticazione Bearer
+
 def require_auth(f):
     @wraps(f)
     def decorated(*args, **kwargs):
@@ -27,13 +27,38 @@ def require_auth(f):
         return f(*args, **kwargs)
     return decorated
 
+
 def generate_group_id():
-    num = 1
-    while True:
-        group_id = f"group{num:03d}"
-        if group_id not in groups:
-            return group_id
-        num += 1
+    return f"group{len(groups)+1:03d}"
+
+
+def assign_user_to_groups_by_scim_groups(user_id, user_data):
+    scim_groups = user_data.get("groups", [])
+    for group in scim_groups:
+        group_name = group.get("display") or group.get("value")
+        if not group_name:
+            continue
+
+        existing_group = next((g for g in groups.values() if g.get("displayName") == group_name), None)
+        if not existing_group:
+            group_id = generate_group_id()
+            groups[group_id] = {
+                "id": group_id,
+                "displayName": group_name,
+                "schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"],
+                "members": [{
+                    "value": user_id,
+                    "display": user_data.get("displayName") or user_data.get("userName") or "unknown"
+                }]
+            }
+        else:
+            members = existing_group.setdefault("members", [])
+            if not any(m["value"] == user_id for m in members):
+                members.append({
+                    "value": user_id,
+                    "display": user_data.get("displayName") or user_data.get("userName") or "unknown"
+                })
+
 
 def build_user(data, user_id):
     return {
@@ -41,10 +66,9 @@ def build_user(data, user_id):
         "userName": data.get("userName"),
         "active": data.get("active", True),
         "displayName": data.get("displayName"),
-        "title": data.get("title"),
         "emails": data.get("emails", []),
-        "preferredLanguage": data.get("preferredLanguage"),
-        "roles": [],  # Ruoli derivati dai gruppi
+        "groups": data.get("groups", []),
+        "schemas": data.get("schemas", []),
         "name": {
             "givenName": data.get("name", {}).get("givenName"),
             "familyName": data.get("name", {}).get("familyName"),
@@ -53,27 +77,26 @@ def build_user(data, user_id):
         "addresses": data.get("addresses", []),
         "phoneNumbers": data.get("phoneNumbers", []),
         "externalId": data.get("externalId"),
-        "schemas": data.get("schemas", []),
-        "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User": {
-            "employeeNumber": data.get("urn:ietf:params:scim:schemas:extension:enterprise:2.0:User", {}).get("employeeNumber"),
-            "department": data.get("urn:ietf:params:scim:schemas:extension:enterprise:2.0:User", {}).get("department"),
-            "manager": data.get("urn:ietf:params:scim:schemas:extension:enterprise:2.0:User", {}).get("manager")
-        }
+        "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User": data.get(
+            "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User", {})
     }
 
-# --- User Routes ---
+# --- USERS ---
 
 @app.route("/scim/v2/Users", methods=["POST"])
 @require_auth
 def create_user():
     data = request.get_json()
-    for user in users.values():
-        if user.get("userName") == data.get("userName"):
-            return jsonify(user), 200
+    for u in users.values():
+        if u.get("userName") == data.get("userName"):
+            return jsonify(u), 200
+
     user_id = data.get("id") or data.get("externalId") or str(uuid.uuid4())
     user = build_user(data, user_id)
     users[user_id] = user
+    assign_user_to_groups_by_scim_groups(user_id, user)
     return jsonify(user), 201
+
 
 @app.route("/scim/v2/Users", methods=["GET"])
 @require_auth
@@ -85,53 +108,44 @@ def list_users():
         return jsonify({"Resources": matched, "totalResults": len(matched), "itemsPerPage": 100, "startIndex": 1})
     return jsonify({"Resources": list(users.values()), "totalResults": len(users), "itemsPerPage": 100, "startIndex": 1})
 
+
 @app.route("/scim/v2/Users/<user_id>", methods=["GET"])
 @require_auth
 def get_user(user_id):
     user = users.get(user_id)
     if not user:
-        abort(404, description="User not found")
+        abort(404)
     return jsonify(user)
+
 
 @app.route("/scim/v2/Users/<user_id>", methods=["PUT"])
 @require_auth
 def update_user(user_id):
     if user_id not in users:
-        abort(404, description="User not found")
+        abort(404)
     data = request.get_json()
     user = build_user(data, user_id)
     users[user_id] = user
+
+    # Remove from all groups
+    for g in groups.values():
+        g["members"] = [m for m in g.get("members", []) if m["value"] != user_id]
+
+    assign_user_to_groups_by_scim_groups(user_id, user)
     return jsonify(user)
 
-@app.route("/scim/v2/Users/<user_id>", methods=["PATCH"])
-@require_auth
-def patch_user(user_id):
-    user = users.get(user_id)
-    if not user:
-        abort(404, description="User not found")
-    data = request.get_json()
-    for op in data.get("Operations", []):
-        if op.get("op", "").lower() == "replace":
-            path = op.get("path")
-            value = op.get("value")
-            if path:
-                user[path] = value
-            elif isinstance(value, dict):
-                user.update(value)
-    users[user_id] = user
-    return jsonify(user)
 
 @app.route("/scim/v2/Users/<user_id>", methods=["DELETE"])
 @require_auth
 def delete_user(user_id):
     if user_id in users:
         del users[user_id]
-        for group in groups.values():
-            group["members"] = [m for m in group.get("members", []) if m["value"] != user_id]
+        for g in groups.values():
+            g["members"] = [m for m in g.get("members", []) if m["value"] != user_id]
         return '', 204
-    abort(404, description="User not found")
+    abort(404)
 
-# --- Group Routes ---
+# --- GROUPS ---
 
 @app.route("/scim/v2/Groups", methods=["GET"])
 @require_auth
@@ -143,13 +157,15 @@ def list_groups():
         "startIndex": 1
     })
 
+
 @app.route("/scim/v2/Groups/<group_id>", methods=["GET"])
 @require_auth
 def get_group(group_id):
     group = groups.get(group_id)
     if not group:
-        abort(404, description="Group not found")
+        abort(404)
     return jsonify(group)
+
 
 @app.route("/scim/v2/Groups", methods=["POST"])
 @require_auth
@@ -157,7 +173,7 @@ def create_group():
     data = request.get_json()
     group_id = data.get("id") or generate_group_id()
     if group_id in groups:
-        abort(409, description="Group already exists")
+        abort(409)
     group = {
         "id": group_id,
         "displayName": data.get("displayName"),
@@ -167,11 +183,12 @@ def create_group():
     groups[group_id] = group
     return jsonify(group), 201
 
+
 @app.route("/scim/v2/Groups/<group_id>", methods=["PUT"])
 @require_auth
 def update_group(group_id):
     if group_id not in groups:
-        abort(404, description="Group not found")
+        abort(404)
     data = request.get_json()
     group = {
         "id": group_id,
@@ -182,12 +199,13 @@ def update_group(group_id):
     groups[group_id] = group
     return jsonify(group)
 
+
 @app.route("/scim/v2/Groups/<group_id>", methods=["PATCH"])
 @require_auth
 def patch_group(group_id):
     group = groups.get(group_id)
     if not group:
-        abort(404, description="Group not found")
+        abort(404)
     data = request.get_json()
     for op in data.get("Operations", []):
         if op.get("op") == "replace":
@@ -200,17 +218,20 @@ def patch_group(group_id):
     groups[group_id] = group
     return jsonify(group)
 
+
 @app.route("/scim/v2/Groups/<group_id>", methods=["DELETE"])
 @require_auth
 def delete_group(group_id):
     if group_id in groups:
         del groups[group_id]
         return '', 204
-    abort(404, description="Group not found")
+    abort(404)
+
 
 @app.route("/")
 def root():
     return "SCIM endpoint OK", 200
+
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
