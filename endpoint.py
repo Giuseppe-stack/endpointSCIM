@@ -16,7 +16,7 @@ VALID_TOKEN = os.environ.get("SCIM_TOKEN", "supersegreto")
 def require_auth(f):
     @wraps(f)
     def decorated(*args, **kwargs):
-        if request.path in ["/", "/favicon.ico", "/scim/v2/ServiceProviderConfig"]:
+        if request.path in ["/", "/favicon.ico", "/scim/v2/ServiceProviderConfig", "/scim/v2/Schemas/Group"]:
             return f(*args, **kwargs)
         auth_header = request.headers.get("Authorization", "")
         if not auth_header.lower().startswith("bearer"):
@@ -32,7 +32,7 @@ def generate_group_id():
     return str(uuid.uuid4())
 
 def enrich_user_with_groups(user):
-    """Ricostruisce i gruppi di cui l'utente è membro."""
+    """Aggiunge i gruppi di cui l'utente è membro."""
     user_groups = []
     for group in groups.values():
         for m in group.get("members", []):
@@ -54,12 +54,12 @@ def build_user(data, user_id):
         "name": {
             "givenName": data.get("name", {}).get("givenName"),
             "familyName": data.get("name", {}).get("familyName"),
-            "formatted": data.get("name", {}).get("formatted")
+            "formatted": data.get("name", {}).get("formatted"),
         },
         "addresses": data.get("addresses", []),
         "phoneNumbers": data.get("phoneNumbers", []),
         "externalId": data.get("externalId"),
-        "schemas": data.get("schemas", [])
+        "schemas": data.get("schemas", []),
     }
 
 # --- User Routes ---
@@ -141,12 +141,7 @@ def list_groups():
         g = group.copy()
         g["members"] = g.get("members", [])
         resources.append(g)
-    return jsonify({
-        "Resources": resources,
-        "totalResults": len(resources),
-        "itemsPerPage": 100,
-        "startIndex": 1
-    })
+    return jsonify({"Resources": resources, "totalResults": len(resources), "itemsPerPage": 100, "startIndex": 1})
 
 @app.route("/scim/v2/Groups/<group_id>", methods=["GET"])
 @require_auth
@@ -168,10 +163,15 @@ def create_group():
     group = {
         "id": group_id,
         "displayName": data.get("displayName"),
-        "members": [],
-        "schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"]
+        "members": data.get("members", []),
+        "schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"],
     }
     groups[group_id] = group
+    # aggiorna gli utenti con i membri
+    for m in group["members"]:
+        uid = m.get("value")
+        if uid in users:
+            users[uid]["groups"].append({"value": group_id, "display": group["displayName"]})
     return jsonify(group), 201
 
 @app.route("/scim/v2/Groups/<group_id>", methods=["PUT"])
@@ -184,9 +184,16 @@ def update_group(group_id):
         "id": group_id,
         "displayName": data.get("displayName"),
         "members": data.get("members", []),
-        "schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"]
+        "schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"],
     }
     groups[group_id] = group
+    # sincronizza utenti
+    for u in users.values():
+        u["groups"] = [g for g in u.get("groups", []) if g["value"] != group_id]
+    for m in group["members"]:
+        uid = m.get("value")
+        if uid in users:
+            users[uid]["groups"].append({"value": group_id, "display": group["displayName"]})
     return jsonify(group)
 
 @app.route("/scim/v2/Groups/<group_id>", methods=["PATCH"])
@@ -199,27 +206,25 @@ def patch_group(group_id):
     data = request.get_json()
     for op in data.get("Operations", []):
         op_type = op.get("op", "").lower()
-        path = op.get("path", "").lower()
-        value = op.get("value", [])
+        path = (op.get("path") or "").lower()
+        value = op.get("value")
 
         if op_type in ["add", "replace"] and path == "members":
             for member in value:
-                if not any(m["value"] == member["value"] for m in group["members"]):
-                    group["members"].append({
-                        "value": member["value"],
-                        "display": users.get(member["value"], {}).get("displayName", member["value"])
-                    })
-                if member["value"] in users:
-                    user = users[member["value"]]
+                if member not in group["members"]:
+                    group["members"].append(member)
+                uid = member.get("value")
+                if uid in users:
+                    user = users[uid]
                     if not any(g["value"] == group_id for g in user.get("groups", [])):
                         user["groups"].append({"value": group_id, "display": group["displayName"]})
 
         elif op_type == "remove" and path == "members":
-            to_remove = [m["value"] for m in value]
+            to_remove = [m.get("value") for m in value]
             group["members"] = [m for m in group["members"] if m["value"] not in to_remove]
-            for user_id in to_remove:
-                if user_id in users:
-                    users[user_id]["groups"] = [g for g in users[user_id]["groups"] if g["value"] != group_id]
+            for uid in to_remove:
+                if uid in users:
+                    users[uid]["groups"] = [g for g in users[uid]["groups"] if g["value"] != group_id]
 
     groups[group_id] = group
     return jsonify(group)
@@ -247,7 +252,7 @@ def service_provider_config():
         "etag": {"supported": False},
         "schemasSupported": [
             "urn:ietf:params:scim:schemas:core:2.0:User",
-            "urn:ietf:params:scim:schemas:core:2.0:Group"
+            "urn:ietf:params:scim:schemas:core:2.0:Group",
         ],
         "authenticationSchemes": [
             {
@@ -256,9 +261,9 @@ def service_provider_config():
                 "description": "Bearer Token Authorization",
                 "specUri": "https://tools.ietf.org/html/rfc6750",
                 "documentationUri": "",
-                "primary": True
+                "primary": True,
             }
-        ]
+        ],
     })
 
 if __name__ == "__main__":
