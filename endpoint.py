@@ -9,7 +9,7 @@ app = Flask(__name__)
 users = {}
 groups = {}
 
-# --- Token di autenticazione ---
+# --- Token di autenticazione (da configurare in Entra ID) ---
 VALID_TOKEN = os.environ.get("SCIM_TOKEN", "supersegreto")
 
 # --- Decoratore autenticazione Bearer ---
@@ -157,7 +157,12 @@ def list_groups():
         g = group.copy()
         g["members"] = g.get("members", [])
         resources.append(g)
-    return jsonify({"Resources": resources, "totalResults": len(resources), "itemsPerPage": 100, "startIndex": 1})
+    return jsonify({
+        "Resources": resources,
+        "totalResults": len(resources),
+        "itemsPerPage": 100,
+        "startIndex": 1
+    })
 
 @app.route("/scim/v2/Groups/<group_id>", methods=["GET"])
 @require_auth
@@ -208,15 +213,32 @@ def patch_group(group_id):
     group = groups.get(group_id)
     if not group:
         abort(404, description="Group not found")
+
     data = request.get_json()
+
     for op in data.get("Operations", []):
-        if op.get("op", "").lower() in ["add", "replace"] and op.get("path", "").lower() == "members":
-            for member in op.get("value", []):
-                if not any(m.get("value") == member.get("value") for m in group["members"]):
-                    group["members"].append(member)
-        elif op.get("op", "").lower() == "remove" and op.get("path", "").lower() == "members":
-            to_remove = [m.get("value") for m in op.get("value", [])]
-            group["members"] = [m for m in group["members"] if m.get("value") not in to_remove]
+        operation = op.get("op", "").lower()
+        path = op.get("path", "").lower()
+        value = op.get("value", [])
+
+        if operation == "replace":
+            if path == "members":
+                group["members"] = value
+            elif not path:
+                group["members"] = value
+
+        elif operation == "add":
+            if path == "members" or not path:
+                existing_ids = {m["value"] for m in group.get("members", [])}
+                for member in value:
+                    if member["value"] not in existing_ids:
+                        group.setdefault("members", []).append(member)
+
+        elif operation == "remove":
+            if path == "members" or not path:
+                remove_ids = [m["value"] if isinstance(m, dict) else m for m in value]
+                group["members"] = [m for m in group.get("members", []) if m["value"] not in remove_ids]
+
     update_users_groups_from_group(group)
     groups[group_id] = group
     return jsonify(group)
