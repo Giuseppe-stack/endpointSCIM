@@ -66,7 +66,7 @@ def build_user(data, user_id):
         "title": data.get("title"),
         "emails": data.get("emails", []),
         "preferredLanguage": data.get("preferredLanguage"),
-        "groups": [],  # popolato da update_users_groups_from_group
+        "groups": [],
         "name": {
             "givenName": data.get("name", {}).get("givenName"),
             "familyName": data.get("name", {}).get("familyName"),
@@ -152,9 +152,14 @@ def delete_user(user_id):
 @app.route("/scim/v2/Groups", methods=["GET"])
 @require_auth
 def list_groups():
+    resources = []
+    for group in groups.values():
+        g = group.copy()
+        g["members"] = g.get("members", [])
+        resources.append(g)
     return jsonify({
-        "Resources": list(groups.values()),
-        "totalResults": len(groups),
+        "Resources": resources,
+        "totalResults": len(resources),
         "itemsPerPage": 100,
         "startIndex": 1
     })
@@ -165,7 +170,9 @@ def get_group(group_id):
     group = groups.get(group_id)
     if not group:
         abort(404, description="Group not found")
-    return jsonify(group)
+    g = group.copy()
+    g["members"] = g.get("members", [])
+    return jsonify(g)
 
 @app.route("/scim/v2/Groups", methods=["POST"])
 @require_auth
@@ -206,7 +213,6 @@ def patch_group(group_id):
     group = groups.get(group_id)
     if not group:
         abort(404, description="Group not found")
-
     data = request.get_json()
     for op in data.get("Operations", []):
         if op.get("op", "").lower() in ["add", "replace"] and op.get("path", "").lower() == "members":
@@ -220,6 +226,9 @@ def patch_group(group_id):
         elif op.get("op", "").lower() == "remove" and op.get("path", "").lower() == "members":
             to_remove = op.get("value", [])
             group["members"] = [m for m in group["members"] if m["value"] not in to_remove]
+            for user_id in to_remove:
+                if user_id in users:
+                    users[user_id]["groups"] = [g for g in users[user_id]["groups"] if g["value"] != group_id]
 
     groups[group_id] = group
     return jsonify(group)
@@ -253,44 +262,10 @@ def service_provider_config():
             {
                 "type": "oauthbearertoken",
                 "name": "Bearer Token",
-                "description": "Authentication using a Bearer token in Authorization header",
-                "specUrl": "https://tools.ietf.org/html/rfc6750",
-                "documentationUrl": "",
+                "description": "Bearer Token Authorization",
+                "specUri": "https://tools.ietf.org/html/rfc6750",
+                "documentationUri": "",
                 "primary": True
-            }
-        ]
-    })
-
-# --- Schema Group ---
-@app.route("/scim/v2/Schemas/Group")
-def schema_group():
-    return jsonify({
-        "id": "urn:ietf:params:scim:schemas:core:2.0:Group",
-        "name": "Group",
-        "description": "SCIM Group schema",
-        "attributes": [
-            {
-                "name": "displayName",
-                "type": "string",
-                "multiValued": False,
-                "description": "Group display name",
-                "required": True,
-                "caseExact": False,
-                "mutability": "readWrite",
-                "returned": "default"
-            },
-            {
-                "name": "members",
-                "type": "complex",
-                "multiValued": True,
-                "description": "Members of the group",
-                "required": False,
-                "mutability": "readWrite",
-                "returned": "default",
-                "subAttributes": [
-                    {"name": "value", "type": "string", "required": True, "mutability": "readWrite"},
-                    {"name": "display", "type": "string", "required": False, "mutability": "readWrite"}
-                ]
             }
         ]
     })
