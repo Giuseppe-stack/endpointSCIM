@@ -202,6 +202,28 @@ def update_group(group_id):
     update_users_groups_from_group(group)
     return jsonify(group)
 
+@app.route("/scim/v2/Groups/<group_id>", methods=["PATCH"])
+@require_auth
+def patch_group(group_id):
+    group = groups.get(group_id)
+    if not group:
+        abort(404, description="Group not found")
+
+    data = request.get_json()
+    for op in data.get("Operations", []):
+        if op.get("op", "").lower() == "replace":
+            path = op.get("path")
+            value = op.get("value")
+            if path and path.lower() == "members":
+                group["members"] = value
+            elif isinstance(value, dict):
+                group.update(value)
+
+    groups[group_id] = group
+    update_users_groups_from_group(group)
+    return jsonify(group)
+
+
 @app.route("/scim/v2/Groups/<group_id>", methods=["DELETE"])
 @require_auth
 def delete_group(group_id):
