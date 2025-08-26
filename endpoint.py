@@ -9,7 +9,7 @@ app = Flask(__name__)
 users = {}
 groups = {}
 
-# --- Token di autenticazione ---
+# --- Token di autenticazione (da configurare in Entra ID) ---
 VALID_TOKEN = os.environ.get("SCIM_TOKEN", "supersegreto")
 
 # --- Decoratore autenticazione Bearer ---
@@ -41,22 +41,6 @@ def enrich_user_with_groups(user):
     user["groups"] = user_groups
     return user
 
-def update_users_groups_from_group(group):
-    """Aggiorna gli utenti in base ai membri del gruppo."""
-    group_name = group.get("displayName")
-    member_ids = [m.get("value") for m in group.get("members", [])]
-
-    # Rimuovi gruppo dagli utenti non più membri
-    for user in users.values():
-        user["groups"] = [g for g in user.get("groups", []) if g.get("display") != group_name]
-
-    # Aggiungi gruppo agli utenti membri
-    for member_id in member_ids:
-        if member_id in users:
-            user = users[member_id]
-            if not any(g.get("display") == group_name for g in user.get("groups", [])):
-                user["groups"].append({"value": group["id"], "display": group_name})
-
 def build_user(data, user_id):
     return {
         "id": user_id,
@@ -70,12 +54,12 @@ def build_user(data, user_id):
         "name": {
             "givenName": data.get("name", {}).get("givenName"),
             "familyName": data.get("name", {}).get("familyName"),
-            "formatted": data.get("name", {}).get("formatted")
+            "formatted": data.get("name", {}).get("formatted"),
         },
         "addresses": data.get("addresses", []),
         "phoneNumbers": data.get("phoneNumbers", []),
         "externalId": data.get("externalId"),
-        "schemas": data.get("schemas", [])
+        "schemas": data.get("schemas", []),
     }
 
 # --- User Routes ---
@@ -157,12 +141,7 @@ def list_groups():
         g = group.copy()
         g["members"] = g.get("members", [])
         resources.append(g)
-    return jsonify({
-        "Resources": resources,
-        "totalResults": len(resources),
-        "itemsPerPage": 100,
-        "startIndex": 1
-    })
+    return jsonify({"Resources": resources, "totalResults": len(resources), "itemsPerPage": 100, "startIndex": 1})
 
 @app.route("/scim/v2/Groups/<group_id>", methods=["GET"])
 @require_auth
@@ -185,10 +164,14 @@ def create_group():
         "id": group_id,
         "displayName": data.get("displayName"),
         "members": data.get("members", []),
-        "schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"]
+        "schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"],
     }
     groups[group_id] = group
-    update_users_groups_from_group(group)
+    # aggiorna gli utenti con i membri
+    for m in group["members"]:
+        uid = m.get("value")
+        if uid in users:
+            users[uid]["groups"].append({"value": group_id, "display": group["displayName"]})
     return jsonify(group), 201
 
 @app.route("/scim/v2/Groups/<group_id>", methods=["PUT"])
@@ -201,10 +184,16 @@ def update_group(group_id):
         "id": group_id,
         "displayName": data.get("displayName"),
         "members": data.get("members", []),
-        "schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"]
+        "schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"],
     }
     groups[group_id] = group
-    update_users_groups_from_group(group)
+    # sincronizza utenti
+    for u in users.values():
+        u["groups"] = [g for g in u.get("groups", []) if g["value"] != group_id]
+    for m in group["members"]:
+        uid = m.get("value")
+        if uid in users:
+            users[uid]["groups"].append({"value": group_id, "display": group["displayName"]})
     return jsonify(group)
 
 @app.route("/scim/v2/Groups/<group_id>", methods=["PATCH"])
@@ -213,23 +202,30 @@ def patch_group(group_id):
     group = groups.get(group_id)
     if not group:
         abort(404, description="Group not found")
+
     data = request.get_json()
     for op in data.get("Operations", []):
-        path = op.get("path", "").lower()
-        if op.get("op", "").lower() in ["add", "replace"] and path == "members":
-            for member in op.get("value", []):
-                if not any(m["value"] == member["value"] for m in group["members"]):
+        op_type = op.get("op", "").lower()
+        path = (op.get("path") or "").lower()
+        value = op.get("value")
+
+        if op_type in ["add", "replace"] and path == "members":
+            for member in value:
+                if member not in group["members"]:
                     group["members"].append(member)
-                if member["value"] in users:
-                    user = users[member["value"]]
+                uid = member.get("value")
+                if uid in users:
+                    user = users[uid]
                     if not any(g["value"] == group_id for g in user.get("groups", [])):
-                        user.setdefault("groups", []).append({"value": group_id, "display": group["displayName"]})
-        elif op.get("op", "").lower() == "remove" and path == "members":
-            remove_ids = [m["value"] for m in op.get("value", [])]
-            group["members"] = [m for m in group["members"] if m["value"] not in remove_ids]
-            for user_id in remove_ids:
-                if user_id in users:
-                    users[user_id]["groups"] = [g for g in users[user_id]["groups"] if g["value"] != group_id]
+                        user["groups"].append({"value": group_id, "display": group["displayName"]})
+
+        elif op_type == "remove" and path == "members":
+            to_remove = [m.get("value") for m in value]
+            group["members"] = [m for m in group["members"] if m["value"] not in to_remove]
+            for uid in to_remove:
+                if uid in users:
+                    users[uid]["groups"] = [g for g in users[uid]["groups"] if g["value"] != group_id]
+
     groups[group_id] = group
     return jsonify(group)
 
@@ -244,27 +240,31 @@ def delete_group(group_id):
     abort(404, description="Group not found")
 
 # --- Service Provider Config ---
-@app.route("/scim/v2/ServiceProviderConfig", methods=["GET"])
+@app.route("/scim/v2/ServiceProviderConfig")
 def service_provider_config():
     return jsonify({
         "schemas": ["urn:ietf:params:scim:schemas:core:2.0:ServiceProviderConfig"],
         "patch": {"supported": True},
         "bulk": {"supported": False},
-        "filter": {"supported": True, "maxResults": 100},
+        "filter": {"supported": True, "maxResults": 200},
         "changePassword": {"supported": False},
         "sort": {"supported": True},
         "etag": {"supported": False},
+        "schemasSupported": [
+            "urn:ietf:params:scim:schemas:core:2.0:User",
+            "urn:ietf:params:scim:schemas:core:2.0:Group",
+        ],
         "authenticationSchemes": [
             {
                 "type": "oauthbearertoken",
-                "name": "OAuth Bearer Token",
-                "description": "Authentication scheme using the OAuth Bearer Token standard",
-                "specUri": "http://www.rfc-editor.org/info/rfc6750",
+                "name": "Bearer Token",
+                "description": "Bearer Token Authorization",
+                "specUri": "https://tools.ietf.org/html/rfc6750",
                 "documentationUri": "",
-                "primary": True
+                "primary": True,
             }
-        ]
+        ],
     })
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    app.run(host="0.0.0.0", port=5000)
