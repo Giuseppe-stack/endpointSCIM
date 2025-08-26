@@ -211,17 +211,22 @@ def patch_group(group_id):
 
     data = request.get_json()
     for op in data.get("Operations", []):
-        if op.get("op", "").lower() == "replace":
-            path = op.get("path")
-            value = op.get("value")
-            if path and path.lower() == "members":
-                group["members"] = value
-            elif isinstance(value, dict):
-                group.update(value)
+        if op.get("op", "").lower() in ["add", "replace"] and op.get("path", "").lower() == "members":
+            for member in op.get("value", []):
+                if member not in group["members"]:
+                    group["members"].append(member)
+                    # aggiorna anche lato utente
+                    if member["value"] in users:
+                        user = users[member["value"]]
+                        if not any(g["value"] == group_id for g in user.get("groups", [])):
+                            user.setdefault("groups", []).append({"value": group_id, "display": group["displayName"]})
+        elif op.get("op", "").lower() == "remove" and op.get("path", "").lower() == "members":
+            to_remove = op.get("value", [])
+            group["members"] = [m for m in group["members"] if m["value"] not in to_remove]
 
     groups[group_id] = group
-    update_users_groups_from_group(group)
     return jsonify(group)
+
 
 
 @app.route("/scim/v2/Groups/<group_id>", methods=["DELETE"])
