@@ -12,6 +12,7 @@ groups = {}
 # --- Token di autenticazione (da configurare in Entra ID) ---
 VALID_TOKEN = os.environ.get("SCIM_TOKEN", "supersegreto")
 
+
 # --- Decoratore autenticazione Bearer ---
 def require_auth(f):
     @wraps(f)
@@ -28,6 +29,7 @@ def require_auth(f):
             abort(401, description="Invalid Bearer token")
 
         return f(*args, **kwargs)
+
     return decorated
 
 
@@ -77,12 +79,12 @@ def build_user(data, user_id):
         "name": {
             "givenName": data.get("name", {}).get("givenName"),
             "familyName": data.get("name", {}).get("familyName"),
-            "formatted": data.get("name", {}).get("formatted")
+            "formatted": data.get("name", {}).get("formatted"),
         },
         "addresses": data.get("addresses", []),
         "phoneNumbers": data.get("phoneNumbers", []),
         "externalId": data.get("externalId"),
-        "schemas": data.get("schemas", [])
+        "schemas": data.get("schemas", []),
     }
 
 
@@ -108,10 +110,20 @@ def list_users():
     if filter_param and "userName eq " in filter_param:
         username = filter_param.split("userName eq ")[1].strip('"')
         matched = [enrich_user_with_groups(u) for u in users.values() if u.get("userName") == username]
-        return jsonify({"Resources": matched, "totalResults": len(matched), "itemsPerPage": 100, "startIndex": 1})
+        return jsonify({
+            "Resources": matched,
+            "totalResults": len(matched),
+            "itemsPerPage": 100,
+            "startIndex": 1
+        })
 
     all_users = [enrich_user_with_groups(u) for u in users.values()]
-    return jsonify({"Resources": all_users, "totalResults": len(all_users), "itemsPerPage": 100, "startIndex": 1})
+    return jsonify({
+        "Resources": all_users,
+        "totalResults": len(all_users),
+        "itemsPerPage": 100,
+        "startIndex": 1
+    })
 
 
 @app.route("/scim/v2/Users/<user_id>", methods=["GET"])
@@ -140,7 +152,6 @@ def patch_user(user_id):
     user = users.get(user_id)
     if not user:
         abort(404, description="User not found")
-
     data = request.get_json()
     for op in data.get("Operations", []):
         if op.get("op", "").lower() == "replace":
@@ -200,7 +211,6 @@ def create_group():
     group_id = data.get("id") or generate_group_id()
     if group_id in groups:
         abort(409, description="Group already exists")
-
     group = {
         "id": group_id,
         "displayName": data.get("displayName"),
@@ -217,7 +227,6 @@ def create_group():
 def update_group(group_id):
     if group_id not in groups:
         abort(404, description="Group not found")
-
     data = request.get_json()
     group = {
         "id": group_id,
@@ -236,7 +245,6 @@ def patch_group(group_id):
     group = groups.get(group_id)
     if not group:
         abort(404, description="Group not found")
-
     data = request.get_json()
     for op in data.get("Operations", []):
         if op.get("op", "").lower() in ["add", "replace"] and op.get("path", "").lower() == "members":
@@ -246,14 +254,16 @@ def patch_group(group_id):
                 if member["value"] in users:
                     user = users[member["value"]]
                     if not any(g["value"] == group_id for g in user.get("groups", [])):
-                        user.setdefault("groups", []).append({"value": group_id, "display": group["displayName"]})
+                        user.setdefault("groups", []).append({
+                            "value": group_id,
+                            "display": group["displayName"]
+                        })
         elif op.get("op", "").lower() == "remove" and op.get("path", "").lower() == "members":
             to_remove = op.get("value", [])
             group["members"] = [m for m in group["members"] if m["value"] not in to_remove]
             for user_id in to_remove:
                 if user_id in users:
                     users[user_id]["groups"] = [g for g in users[user_id]["groups"] if g["value"] != group_id]
-
     groups[group_id] = group
     return jsonify(group)
 
