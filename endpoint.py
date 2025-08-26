@@ -16,7 +16,7 @@ VALID_TOKEN = os.environ.get("SCIM_TOKEN", "supersegreto")
 def require_auth(f):
     @wraps(f)
     def decorated(*args, **kwargs):
-        if request.path in ["/", "/favicon.ico", "/scim/v2/ServiceProviderConfig"]:
+        if request.path in ["/", "/favicon.ico", "/scim/v2/ServiceProviderConfig", "/scim/v2/Schemas/Group"]:
             return f(*args, **kwargs)
         auth_header = request.headers.get("Authorization", "")
         if not auth_header.lower().startswith("bearer"):
@@ -83,11 +83,9 @@ def build_user(data, user_id):
 @require_auth
 def create_user():
     data = request.get_json()
-    # Controlla se esiste già
     for user in users.values():
         if user.get("userName") == data.get("userName"):
             return jsonify(enrich_user_with_groups(user)), 200
-
     user_id = data.get("id") or data.get("externalId") or str(uuid.uuid4())
     user = build_user(data, user_id)
     users[user_id] = user
@@ -215,7 +213,6 @@ def patch_group(group_id):
             for member in op.get("value", []):
                 if member not in group["members"]:
                     group["members"].append(member)
-                    # aggiorna anche lato utente
                     if member["value"] in users:
                         user = users[member["value"]]
                         if not any(g["value"] == group_id for g in user.get("groups", [])):
@@ -226,8 +223,6 @@ def patch_group(group_id):
 
     groups[group_id] = group
     return jsonify(group)
-
-
 
 @app.route("/scim/v2/Groups/<group_id>", methods=["DELETE"])
 @require_auth
@@ -249,13 +244,56 @@ def service_provider_config():
         "filter": {"supported": True, "maxResults": 200},
         "changePassword": {"supported": False},
         "sort": {"supported": True},
-        "etag": {"supported": False}
+        "etag": {"supported": False},
+        "schemasSupported": [
+            "urn:ietf:params:scim:schemas:core:2.0:User",
+            "urn:ietf:params:scim:schemas:core:2.0:Group"
+        ],
+        "authenticationSchemes": [
+            {
+                "type": "oauthbearertoken",
+                "name": "Bearer Token",
+                "description": "Authentication using a Bearer token in Authorization header",
+                "specUrl": "https://tools.ietf.org/html/rfc6750",
+                "documentationUrl": "",
+                "primary": True
+            }
+        ]
     })
 
-# --- Root ---
-@app.route("/")
-def root():
-    return "SCIM API running"
+# --- Schema Group ---
+@app.route("/scim/v2/Schemas/Group")
+def schema_group():
+    return jsonify({
+        "id": "urn:ietf:params:scim:schemas:core:2.0:Group",
+        "name": "Group",
+        "description": "SCIM Group schema",
+        "attributes": [
+            {
+                "name": "displayName",
+                "type": "string",
+                "multiValued": False,
+                "description": "Group display name",
+                "required": True,
+                "caseExact": False,
+                "mutability": "readWrite",
+                "returned": "default"
+            },
+            {
+                "name": "members",
+                "type": "complex",
+                "multiValued": True,
+                "description": "Members of the group",
+                "required": False,
+                "mutability": "readWrite",
+                "returned": "default",
+                "subAttributes": [
+                    {"name": "value", "type": "string", "required": True, "mutability": "readWrite"},
+                    {"name": "display", "type": "string", "required": False, "mutability": "readWrite"}
+                ]
+            }
+        ]
+    })
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
