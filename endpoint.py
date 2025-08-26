@@ -45,17 +45,15 @@ def update_users_groups_from_group(group):
     """Aggiorna gli utenti in base ai membri del gruppo."""
     group_name = group.get("displayName")
     member_ids = [m.get("value") for m in group.get("members", [])]
-
     # Rimuovi gruppo dagli utenti non più membri
     for user in users.values():
         user["groups"] = [g for g in user.get("groups", []) if g.get("display") != group_name]
-
     # Aggiungi gruppo agli utenti membri
     for member_id in member_ids:
         if member_id in users:
             user = users[member_id]
             if not any(g.get("display") == group_name for g in user.get("groups", [])):
-                user["groups"].append({"value": group["id"], "display": group_name})
+                user.setdefault("groups", []).append({"value": group["id"], "display": group_name})
 
 def build_user(data, user_id):
     return {
@@ -197,10 +195,15 @@ def update_group(group_id):
     if group_id not in groups:
         abort(404, description="Group not found")
     data = request.get_json()
+    existing_group = groups[group_id]
+    # Merge membri senza duplicati
+    members_new = data.get("members", [])
+    merged_members_dict = {m["value"]: m for m in existing_group.get("members", []) + members_new}
+    merged_members = list(merged_members_dict.values())
     group = {
         "id": group_id,
-        "displayName": data.get("displayName"),
-        "members": data.get("members", []),
+        "displayName": data.get("displayName", existing_group.get("displayName")),
+        "members": merged_members,
         "schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"]
     }
     groups[group_id] = group
@@ -215,21 +218,25 @@ def patch_group(group_id):
         abort(404, description="Group not found")
     data = request.get_json()
     for op in data.get("Operations", []):
-        if op.get("op", "").lower() in ["add", "replace"] and op.get("path", "").lower() == "members":
-            for member in op.get("value", []):
-                if member not in group["members"]:
-                    group["members"].append(member)
-                    if member["value"] in users:
-                        user = users[member["value"]]
-                        if not any(g["value"] == group_id for g in user.get("groups", [])):
-                            user.setdefault("groups", []).append({"value": group_id, "display": group["displayName"]})
-        elif op.get("op", "").lower() == "remove" and op.get("path", "").lower() == "members":
-            to_remove = op.get("value", [])
-            group["members"] = [m for m in group["members"] if m["value"] not in to_remove]
-            for user_id in to_remove:
-                if user_id in users:
-                    users[user_id]["groups"] = [g for g in users[user_id]["groups"] if g["value"] != group_id]
-
+        operation = op.get("op", "").lower()
+        path = op.get("path", "").lower()
+        value = op.get("value", [])
+        if path == "members":
+            if operation in ["add", "replace"]:
+                existing_member_ids = {m["value"] for m in group.get("members", [])}
+                for member in value:
+                    if member["value"] not in existing_member_ids:
+                        group["members"].append(member)
+                        if member["value"] in users:
+                            user = users[member["value"]]
+                            if not any(g["value"] == group_id for g in user.get("groups", [])):
+                                user.setdefault("groups", []).append({"value": group_id, "display": group["displayName"]})
+            elif operation == "remove":
+                remove_ids = [m if isinstance(m, str) else m["value"] for m in value]
+                group["members"] = [m for m in group["members"] if m["value"] not in remove_ids]
+                for user_id in remove_ids:
+                    if user_id in users:
+                        users[user_id]["groups"] = [g for g in users[user_id]["groups"] if g["value"] != group_id]
     groups[group_id] = group
     return jsonify(group)
 
