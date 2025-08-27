@@ -9,7 +9,7 @@ app = Flask(__name__)
 users = {}
 groups = {}
 
-# --- Token di autenticazione ---
+# --- Token di autenticazione (da configurare in Entra ID) ---
 VALID_TOKEN = os.environ.get("SCIM_TOKEN", "supersegreto")
 
 # --- Decoratore autenticazione Bearer ---
@@ -32,6 +32,7 @@ def generate_group_id():
     return str(uuid.uuid4())
 
 def enrich_user_with_groups(user):
+    """Aggiunge i gruppi di cui l'utente è membro."""
     user_groups = []
     for group in groups.values():
         for m in group.get("members", []):
@@ -41,17 +42,20 @@ def enrich_user_with_groups(user):
     return user
 
 def update_users_groups_from_group(group):
+    """Aggiorna gli utenti in base ai membri del gruppo."""
     group_name = group.get("displayName")
     member_ids = [m.get("value") for m in group.get("members", [])]
+
     # Rimuovi gruppo dagli utenti non più membri
     for user in users.values():
         user["groups"] = [g for g in user.get("groups", []) if g.get("display") != group_name]
+
     # Aggiungi gruppo agli utenti membri
     for member_id in member_ids:
         if member_id in users:
             user = users[member_id]
             if not any(g.get("display") == group_name for g in user.get("groups", [])):
-                user.setdefault("groups", []).append({"value": group["id"], "display": group_name})
+                user["groups"].append({"value": group["id"], "display": group_name})
 
 def build_user(data, user_id):
     return {
@@ -73,6 +77,18 @@ def build_user(data, user_id):
         "externalId": data.get("externalId"),
         "schemas": data.get("schemas", [])
     }
+
+def ensure_unique_group_display_name(name):
+    """Se il displayName esiste già, aggiunge un suffisso numerico."""
+    existing = [g["displayName"] for g in groups.values()]
+    if name not in existing:
+        return name
+    i = 1
+    new_name = f"{name} ({i})"
+    while new_name in existing:
+        i += 1
+        new_name = f"{name} ({i})"
+    return new_name
 
 # --- User Routes ---
 @app.route("/scim/v2/Users", methods=["POST"])
@@ -175,11 +191,10 @@ def get_group(group_id):
 def create_group():
     data = request.get_json()
     group_id = data.get("id") or generate_group_id()
-    if group_id in groups:
-        abort(409, description="Group already exists")
+    display_name = ensure_unique_group_display_name(data.get("displayName"))
     group = {
         "id": group_id,
-        "displayName": data.get("displayName"),
+        "displayName": display_name,
         "members": data.get("members", []),
         "schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"]
     }
@@ -193,9 +208,10 @@ def update_group(group_id):
     if group_id not in groups:
         abort(404, description="Group not found")
     data = request.get_json()
+    display_name = ensure_unique_group_display_name(data.get("displayName"))
     group = {
         "id": group_id,
-        "displayName": data.get("displayName"),
+        "displayName": display_name,
         "members": data.get("members", []),
         "schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"]
     }
@@ -209,38 +225,24 @@ def patch_group(group_id):
     group = groups.get(group_id)
     if not group:
         abort(404, description="Group not found")
-
     data = request.get_json()
     for op in data.get("Operations", []):
-        operation = op.get("op", "").lower()
-        path = op.get("path", "").lower()
-        value = op.get("value", [])
-
-        if operation in ["add", "replace"] and path == "members":
-            for member in value:
-                user_id = member.get("value")
-                if not any(m["value"] == user_id for m in group.get("members", [])):
-                    group.setdefault("members", []).append({
-                        "value": user_id,
-                        "display": member.get("display")
-                    })
-                if user_id in users:
-                    user = users[user_id]
-                    if not any(g["value"] == group_id for g in user.get("groups", [])):
-                        user.setdefault("groups", []).append({
-                            "value": group_id,
-                            "display": group["displayName"]
-                        })
-
-        elif operation == "remove" and path == "members":
-            to_remove = [m.get("value") for m in value]
-            group["members"] = [m for m in group.get("members", []) if m["value"] not in to_remove]
+        if op.get("op", "").lower() in ["add", "replace"] and op.get("path", "").lower() == "members":
+            for member in op.get("value", []):
+                if member not in group["members"]:
+                    group["members"].append(member)
+                    if member["value"] in users:
+                        user = users[member["value"]]
+                        if not any(g["value"] == group_id for g in user.get("groups", [])):
+                            user.setdefault("groups", []).append({"value": group_id, "display": group["displayName"]})
+        elif op.get("op", "").lower() == "remove" and op.get("path", "").lower() == "members":
+            to_remove = [m["value"] for m in op.get("value", [])]
+            group["members"] = [m for m in group["members"] if m["value"] not in to_remove]
             for user_id in to_remove:
                 if user_id in users:
                     users[user_id]["groups"] = [g for g in users[user_id]["groups"] if g["value"] != group_id]
-
     groups[group_id] = group
-    return jsonify(group), 200
+    return jsonify(group)
 
 @app.route("/scim/v2/Groups/<group_id>", methods=["DELETE"])
 @require_auth
@@ -263,11 +265,14 @@ def service_provider_config():
         "changePassword": {"supported": False},
         "sort": {"supported": True},
         "etag": {"supported": False},
-        "schemasSupported": [
-            "urn:ietf:params:scim:schemas:core:2.0:User",
-            "urn:ietf:params:scim:schemas:core:2.0:Group"
-        ],
-        "authenticationSchemes": [{"type": "oauth2", "name": "Bearer", "description": "OAuth Bearer Token"}]
+        "authenticationSchemes": [{
+            "type": "oauthbearertoken",
+            "name": "OAuth Bearer Token",
+            "description": "Authentication scheme using OAuth Bearer Token",
+            "specUri": "https://tools.ietf.org/html/rfc6750",
+            "documentationUri": "",
+            "primary": True
+        }]
     })
 
 if __name__ == "__main__":
