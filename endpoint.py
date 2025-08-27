@@ -204,30 +204,40 @@ def patch_group(group_id):
         abort(404, description="Group not found")
 
     data = request.get_json()
+
     for op in data.get("Operations", []):
-        op_type = op.get("op", "").lower()
-        path = (op.get("path") or "").lower()
-        value = op.get("value")
+        operation = op.get("op", "").lower()
+        path = op.get("path", "").lower()
+        value = op.get("value", [])
 
-        if op_type in ["add", "replace"] and path == "members":
+        if operation in ["add", "replace"] and path == "members":
             for member in value:
-                if member not in group["members"]:
-                    group["members"].append(member)
-                uid = member.get("value")
-                if uid in users:
-                    user = users[uid]
-                    if not any(g["value"] == group_id for g in user.get("groups", [])):
-                        user["groups"].append({"value": group_id, "display": group["displayName"]})
+                user_id = member.get("value")
+                if not any(m["value"] == user_id for m in group.get("members", [])):
+                    group.setdefault("members", []).append({
+                        "value": user_id,
+                        "display": member.get("display")
+                    })
 
-        elif op_type == "remove" and path == "members":
+                # Aggiorna i gruppi dell'utente
+                if user_id in users:
+                    user = users[user_id]
+                    if not any(g["value"] == group_id for g in user.get("groups", [])):
+                        user.setdefault("groups", []).append({
+                            "value": group_id,
+                            "display": group["displayName"]
+                        })
+
+        elif operation == "remove" and path == "members":
             to_remove = [m.get("value") for m in value]
-            group["members"] = [m for m in group["members"] if m["value"] not in to_remove]
-            for uid in to_remove:
-                if uid in users:
-                    users[uid]["groups"] = [g for g in users[uid]["groups"] if g["value"] != group_id]
+            group["members"] = [m for m in group.get("members", []) if m["value"] not in to_remove]
+            for user_id in to_remove:
+                if user_id in users:
+                    users[user_id]["groups"] = [g for g in users[user_id]["groups"] if g["value"] != group_id]
 
     groups[group_id] = group
-    return jsonify(group)
+    return jsonify(group), 200
+
 
 @app.route("/scim/v2/Groups/<group_id>", methods=["DELETE"])
 @require_auth
