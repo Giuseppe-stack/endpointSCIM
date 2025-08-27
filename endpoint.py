@@ -9,7 +9,7 @@ app = Flask(__name__)
 users = {}
 groups = {}
 
-# --- Token di autenticazione (da configurare in Entra ID) ---
+# --- Token di autenticazione ---
 VALID_TOKEN = os.environ.get("SCIM_TOKEN", "supersegreto")
 
 # --- Decoratore autenticazione Bearer ---
@@ -32,7 +32,6 @@ def generate_group_id():
     return str(uuid.uuid4())
 
 def enrich_user_with_groups(user):
-    """Aggiunge i gruppi di cui l'utente è membro."""
     user_groups = []
     for group in groups.values():
         for m in group.get("members", []):
@@ -40,6 +39,19 @@ def enrich_user_with_groups(user):
                 user_groups.append({"value": group["id"], "display": group["displayName"]})
     user["groups"] = user_groups
     return user
+
+def update_users_groups_from_group(group):
+    group_name = group.get("displayName")
+    member_ids = [m.get("value") for m in group.get("members", [])]
+    # Rimuovi gruppo dagli utenti non più membri
+    for user in users.values():
+        user["groups"] = [g for g in user.get("groups", []) if g.get("display") != group_name]
+    # Aggiungi gruppo agli utenti membri
+    for member_id in member_ids:
+        if member_id in users:
+            user = users[member_id]
+            if not any(g.get("display") == group_name for g in user.get("groups", [])):
+                user.setdefault("groups", []).append({"value": group["id"], "display": group_name})
 
 def build_user(data, user_id):
     return {
@@ -54,12 +66,12 @@ def build_user(data, user_id):
         "name": {
             "givenName": data.get("name", {}).get("givenName"),
             "familyName": data.get("name", {}).get("familyName"),
-            "formatted": data.get("name", {}).get("formatted"),
+            "formatted": data.get("name", {}).get("formatted")
         },
         "addresses": data.get("addresses", []),
         "phoneNumbers": data.get("phoneNumbers", []),
         "externalId": data.get("externalId"),
-        "schemas": data.get("schemas", []),
+        "schemas": data.get("schemas", [])
     }
 
 # --- User Routes ---
@@ -141,7 +153,12 @@ def list_groups():
         g = group.copy()
         g["members"] = g.get("members", [])
         resources.append(g)
-    return jsonify({"Resources": resources, "totalResults": len(resources), "itemsPerPage": 100, "startIndex": 1})
+    return jsonify({
+        "Resources": resources,
+        "totalResults": len(resources),
+        "itemsPerPage": 100,
+        "startIndex": 1
+    })
 
 @app.route("/scim/v2/Groups/<group_id>", methods=["GET"])
 @require_auth
@@ -164,14 +181,10 @@ def create_group():
         "id": group_id,
         "displayName": data.get("displayName"),
         "members": data.get("members", []),
-        "schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"],
+        "schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"]
     }
     groups[group_id] = group
-    # aggiorna gli utenti con i membri
-    for m in group["members"]:
-        uid = m.get("value")
-        if uid in users:
-            users[uid]["groups"].append({"value": group_id, "display": group["displayName"]})
+    update_users_groups_from_group(group)
     return jsonify(group), 201
 
 @app.route("/scim/v2/Groups/<group_id>", methods=["PUT"])
@@ -184,16 +197,10 @@ def update_group(group_id):
         "id": group_id,
         "displayName": data.get("displayName"),
         "members": data.get("members", []),
-        "schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"],
+        "schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"]
     }
     groups[group_id] = group
-    # sincronizza utenti
-    for u in users.values():
-        u["groups"] = [g for g in u.get("groups", []) if g["value"] != group_id]
-    for m in group["members"]:
-        uid = m.get("value")
-        if uid in users:
-            users[uid]["groups"].append({"value": group_id, "display": group["displayName"]})
+    update_users_groups_from_group(group)
     return jsonify(group)
 
 @app.route("/scim/v2/Groups/<group_id>", methods=["PATCH"])
@@ -204,7 +211,6 @@ def patch_group(group_id):
         abort(404, description="Group not found")
 
     data = request.get_json()
-
     for op in data.get("Operations", []):
         operation = op.get("op", "").lower()
         path = op.get("path", "").lower()
@@ -218,8 +224,6 @@ def patch_group(group_id):
                         "value": user_id,
                         "display": member.get("display")
                     })
-
-                # Aggiorna i gruppi dell'utente
                 if user_id in users:
                     user = users[user_id]
                     if not any(g["value"] == group_id for g in user.get("groups", [])):
@@ -237,7 +241,6 @@ def patch_group(group_id):
 
     groups[group_id] = group
     return jsonify(group), 200
-
 
 @app.route("/scim/v2/Groups/<group_id>", methods=["DELETE"])
 @require_auth
@@ -262,18 +265,9 @@ def service_provider_config():
         "etag": {"supported": False},
         "schemasSupported": [
             "urn:ietf:params:scim:schemas:core:2.0:User",
-            "urn:ietf:params:scim:schemas:core:2.0:Group",
+            "urn:ietf:params:scim:schemas:core:2.0:Group"
         ],
-        "authenticationSchemes": [
-            {
-                "type": "oauthbearertoken",
-                "name": "Bearer Token",
-                "description": "Bearer Token Authorization",
-                "specUri": "https://tools.ietf.org/html/rfc6750",
-                "documentationUri": "",
-                "primary": True,
-            }
-        ],
+        "authenticationSchemes": [{"type": "oauth2", "name": "Bearer", "description": "OAuth Bearer Token"}]
     })
 
 if __name__ == "__main__":
